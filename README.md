@@ -19,9 +19,11 @@ Two entry paths:
 
 It is **slower and costlier per sweep** than letting the main agent read the files itself. That is measured, not estimated — see [Benchmark](#benchmark) for the run, the numbers and the caveats. The short version:
 
-> Slightly slower per sweep (1.16x: 16,276 ms vs 13,983 ms median) and somewhat costlier ($0.0176 vs $0.0122 per run), in exchange for 20–36x less context consumed, recall 1.00 instead of a baseline median of 0.50–1.00, and citations that are mechanically verified before they reach you.
+> Slightly slower per sweep (1.16x: 16,276 ms vs 13,983 ms median) and somewhat costlier ($0.0176 vs $0.0122 per run), in exchange for 20–36x less context consumed, more reliable recall **on focused questions** — median 1.00 against a baseline that swings 0.50–1.00 — and citations that are mechanically verified before they reach you.
 
-The trade has a losing side and it is worth naming: the unaided baseline was faster on every question in every configuration, it was cheaper, and its *precision* was better on all four questions (0.29–1.00 vs 0.25–0.67) because an explorer cites more files than it strictly needs to. An earlier version of this design named "make the main agent faster, measurably" as a hard requirement with an acceptance test. It was tested and it failed. The goal has been retired and the failure is recorded in [the design spec](docs/superpowers/specs/2026-09-10-fast-explorer-design.md) rather than quietly dropped.
+**The recall advantage is established on focused questions and is not established on broad ones.** On the one benchmark question whose answer spans four subsystems (`bash-approval`, ~5,100 lines), the unaided baseline matched one explorer exactly — recall median 1.00 for both, 4 of 5 runs perfect in each arm — while being 1.26x faster and 1.26x cheaper. The extension bought nothing there except a smaller context and citations. Fan-out on that question was worse than both: recall 0.80. See [The second sweep](#the-second-sweep--a-question-that-spans-subsystems).
+
+The trade has a losing side and it is worth naming: the unaided baseline was faster on every question in every configuration, it was cheaper, and its *precision* was better on all four questions of the first sweep (0.29–1.00 vs 0.25–0.67) because an explorer cites more files than it strictly needs to. (Precision did not replicate as a clean loss in the second sweep — one explorer was worse on one question, better on two and tied on two — so treat the precision gap as real but not as a fixed ratio.) An earlier version of this design named "make the main agent faster, measurably" as a hard requirement with an acceptance test. It was tested and it failed. The goal has been retired and the failure is recorded in [the design spec](docs/superpowers/specs/2026-09-10-fast-explorer-design.md) rather than quietly dropped.
 
 **Why the context number is the one to weigh.** The latency and the cost are paid once, at the moment of the sweep. The tokens are paid on every turn after it. A baseline sweep put a median of 24k–49k tokens of file contents into the main agent's context, and those tokens are re-sent with every subsequent request until compaction throws them away — and the compaction itself is a multi-second synchronous stall you have also brought forward. An explorer report is 1.1k–1.4k tokens, and that is all the main agent ever carries: the explorer's own reading happens in a separate process whose context is discarded when it exits. Two arms whose per-sweep costs are within 1.5x of each other therefore leave the session in very different states.
 
@@ -58,27 +60,31 @@ To remove it: `rm ~/.pi/agent/extensions/fast-explorer`.
 ```ts
 explore({
   question: string,      // what you need to find out
-  questions?: string[],  // pre-decomposed sub-questions, one per explorer
+  questions?: string[],  // sub-questions, one per explorer — NOT recommended, see below
   scope?: string,        // glob or directory to limit the search
   fanout?: number,       // lower the number of explorers for this call
 })
 ```
 
-### `questions`: when to fan out, and what it costs
+### `questions`: measured, and not recommended
 
 Each entry in `questions` becomes one explorer's brief, and those explorers run concurrently. **Omit `questions` and you get exactly one explorer**, working on `question` alone — there is no planner subagent that decomposes the question for you. The original design had one; it is not in the code, and nothing substitutes for it.
 
-One explorer is the right default. Measured against a real repository (`openai/gpt-5.6-luna`, 20 runs per arm), fanning a single question out to four explorers cost **3.6x** as much ($0.0629 vs $0.0176 per run) for **identical recall** (median 1.00 either way, on every question both arms scored) and consistently *worse* precision (per-question medians 0.12–0.29 vs 0.25–0.67) — four explorers cite more files and dilute the ones that matter. It was slower, too: 19,051 ms vs 16,276 ms median, because wall-clock is set by the slowest explorer, not the sum. The concurrency pool was not at fault; it measured 3.0–3.3x against sequential execution, near its ceiling of 4. Those questions were simply saturated by one explorer, leaving the other three nothing left to find.
+**One explorer is the default, and decomposition has no measured benefit.** Two sweeps against a real repository (`openai/gpt-5.6-luna` on `~/claude-plus-plus`) say the same thing from two directions:
 
-So decompose when the question genuinely spans **separable areas of the codebase** — distinct subsystems, or facets that have to be looked for in different places — and not merely because the question can be phrased as several questions.
+- **On questions one explorer already covers**, fanning out to four cost **3.6x** as much for **identical recall** (median 1.00 either way) and consistently *worse* precision — four explorers cite more files and dilute the ones that matter. That held in both sweeps.
+- **On the one question whose answer genuinely spans separable areas of the codebase** — shell-command approval in `~/claude-plus-plus`, four subsystems and ~5,100 lines, added specifically to give fan-out its best case — fan-out cost **2.3x** the single explorer and **found less**: recall 0.80 against 1.00, missing `interactiveHandler.ts` in **4 of 5 runs** despite having a sub-question aimed squarely at it.
 
-That guidance is the honest reading of the evidence, but note what the evidence does *not* contain: every benchmark question turned out to be answerable by a single explorer, so there is measured evidence that fan-out is wasteful on a saturated question and **no** evidence either way about a genuinely separable one. See [Open question: is fan-out ever worth it?](#open-question-is-fan-out-ever-worth-it).
+That second result is the important one, because it is the case the earlier guidance steered toward. The diagnosis is partition blindness, now measured rather than predicted: each explorer covers its slice and stops, so the connective tissue between subsystems is exactly what falls through. The concurrency pool is not at fault — it measured 2.98–3.56x against sequential execution on four explorers, near its ceiling of 4.
+
+**What this evidence is not.** One separable question, one model, one corpus, hand-written sub-questions. It is suggestive, not conclusive, and it is not a demonstration that fan-out can never help. What it does establish is that there is currently **no measured case in which `questions` pays**, so the tool description, the `promptGuidelines` and the parameter description all now say so. See [Open question: is fan-out ever worth it?](#open-question-is-fan-out-ever-worth-it) for the numbers and for the design that fits them.
 
 ```ts
-// one explorer: one subsystem, one place to look
+// the default, and the only configuration with evidence behind it
 explore({ question: "How does the tokenizer handle trailing commas?" })
 
-// three explorers: three parts of the tree, none of which covers the others
+// the shape `questions` takes, if you supply it anyway. Measured, this cost 2.3x
+// a single explorer and found less, on a question with exactly this structure.
 explore({
   question: "How does session auth work?",
   questions: [
@@ -89,7 +95,9 @@ explore({
 })
 ```
 
-Supplying `questions` also removes a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call. That saving is real, but it is a saving on a split you had reason to make — it is not a reason to split a question one explorer already covers. The tool's `promptGuidelines` carry the same rule and the same cost figure; a model can always ignore guidance, so if you are calling `explore` yourself, apply the test above deliberately.
+The path is kept rather than removed. One separable question is too thin a basis for deleting tested, working code, and the same machinery is what a sequential-escalation design would run on. But it is no longer recommended anywhere, and a call that supplies `questions` is a bet against the only measurement there is.
+
+Supplying `questions` does still remove a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call. That saving is real and it is not the point — it saves a round-trip on a split that measured worse than not splitting. A model can always ignore guidance, so if you are calling `explore` yourself, the numbers above are the ones to weigh.
 
 `questions` is truncated to `maxFanout` entries. `fanout` is clamped into `[1, maxFanout]`, so it can only narrow a call, never widen it past the configured ceiling.
 
@@ -223,9 +231,11 @@ npm run bench -- --self-check              # score synthetic reports, no model c
 
 Results are written to `bench/results/<timestamp>.json`. The suite skips with a clear message when the corpus is absent, so the published package does not depend on anyone having a particular clone.
 
-### The run these numbers come from
+There are two recorded sweeps. The first, below, is where the latency, context and citation-quality numbers come from. The second ([The second sweep](#the-second-sweep--a-question-that-spans-subsystems)) re-ran everything at the current defaults and added a question built to span subsystems; it is where the fan-out result comes from.
 
-`bench/results/2026-09-11T04-37-10.json` — corpus `~/claude-plus-plus`, model `openai/gpt-5.6-luna`, 4 questions × 5 runs × 3 arms, 60 runs. The arms:
+### The first sweep — latency, context, citations
+
+`bench/results/2026-09-11T04-37-10.json` — corpus `~/claude-plus-plus`, model `openai/gpt-5.6-luna`, 4 questions × 5 runs × 3 arms, 60 runs, `maxTurnsPerExplorer: 5`. The arms:
 
 | arm | what it is |
 |---|---|
@@ -271,9 +281,9 @@ Per-question medians, against a ground-truth file set established by exhaustive 
 | cache-safety | 1.00 | 1.00 | 0.29 | 0.25 |
 | tracking | 1.00 | 1.00 | 0.33 | 0.29 |
 
-The explorer's recall median was 1.00 on all four. The baseline's swung run to run — 0.00 to 0.50 on microcompact, 0.00 to 1.00 on cache-safety, 0.50 to 1.00 on tracking. Recall is the metric that decides whether the answer you get is built on the right files, and it is where the explorer is reliably better.
+The explorer's recall median was 1.00 on all four. The baseline's swung run to run — 0.00 to 0.50 on microcompact, 0.00 to 1.00 on cache-safety, 0.50 to 1.00 on tracking. Recall is the metric that decides whether the answer you get is built on the right files, and it is where the explorer is reliably better **on questions of this size**. All four of these are answerable from one or two files in a single directory. On the broader question added later, the baseline matched the explorer at 1.00 and the advantage disappeared — see [the second sweep](#the-second-sweep--a-question-that-spans-subsystems).
 
-Precision goes the other way, on all four questions: an explorer cites more files than the baseline does, including ones that are not in the ground-truth set. That is the cost of asking a subagent to over-report rather than under-report, and it means you will read some citations that turn out not to matter.
+Precision goes the other way, on all four questions: an explorer cites more files than the baseline does, including ones that are not in the ground-truth set. That is the cost of asking a subagent to over-report rather than under-report, and it means you will read some citations that turn out not to matter. (This did not replicate cleanly in the second sweep, where one explorer was worse on one question, better on two and tied on two.)
 
 #### Citation quality
 
@@ -293,25 +303,62 @@ Drift is corrected rather than gated: `synthesize` runs every report through `re
 
 The verifier itself was validated by injecting 49,985 mutations into known-good quotes: 182 escaped (0.364%), and **every** escape fell in one class — all-comment quotes where deleting a word still leaves a contiguous verbatim run, which the `reflowed` verdict is defined to accept. Restricted to quotes containing code, 43,777 mutations were injected and none escaped.
 
+### The second sweep — a question that spans subsystems
+
+`bench/results/2026-09-11T05-44-05.json` — same corpus, same model, current defaults (`maxTurnsPerExplorer: 8`), 5 questions × 5 runs × 3 arms, 75 runs, 0 failures, 34 minutes, $2.79.
+
+The fifth question exists because the first sweep could not answer the question that mattered most: every question in it was saturated by a single explorer, so fan-out had never been tested on the case it was designed for. `bash-approval` — *"when a shell command needs approval, how is that decided, how is the user asked, and how is an 'always allow' answer remembered?"* — was added because its answer lives in four separate top-level subsystems of `~/claude-plus-plus`, about 5,100 lines: generic rule evaluation, shell rule matching, the interactive ask, and the UI that presents it. Its four sub-questions were hand-written to be derivable from the parent question alone, with no knowledge of the corpus, so the fan-out arm got no advantage a real caller could not have had.
+
+Per-question medians over 5 runs, all three arms scored the same way (by which ground-truth files the answer names — the baseline answers in prose and cites nothing in the explorer format, so citation-based scoring is not comparable across arms):
+
+| arm | recall | precision | median latency | cost/run |
+|---|---|---|---|---|
+| baseline (no extension) | **1.00** | 0.50 | **26,075 ms** | **$0.0296** |
+| explorer (one) | **1.00** | **0.625** | 32,916 ms | $0.0373 |
+| fanout (four) | **0.80** | 0.235 | 35,154 ms | $0.0872 |
+
+**Fan-out lost its own best case.** It was the only arm that missed a ground-truth file in the median run, and it missed the *same* file — `src/hooks/toolPermission/handlers/interactiveHandler.ts`, the interactive ask — in **4 of 5 runs**, despite one of its four sub-questions being "how is the approval request presented to the user, and what choices are offered?". The single explorer missed a ground-truth file in 1 of 5 runs and never missed that one; the baseline missed one in 1 of 5. Partition blindness stops being a theoretical risk in the design document at this point and becomes a measured effect: each explorer covers its slice and stops, and what connects the slices is what goes missing.
+
+**The extension won nothing on recall here.** One explorer tied the unaided baseline at 1.00 while costing 1.26x more and taking 1.26x longer. It was better on precision (0.625 vs 0.50) and it still keeps the file contents out of the main context — but the reliability argument that carries this README elsewhere does not apply to this question. It also strained the turn budget: 3 of 5 explorer runs and 2 of 5 fan-out runs exceeded the advisory 8 turns, against 0 of 5 for the baseline.
+
+**On the other four questions the first sweep replicated at the new defaults.** Fan-out cost 3.6x the single explorer ($0.0671 vs $0.0184 per run) for identical recall (median 1.00 both), with worse precision on every one of the five questions (per-question medians 0.08–0.25 against 0.17–0.63). The concurrency pool is again not the explanation: per-question speedup medians were 2.98–3.56x on four explorers, near the ceiling of 4.
+
+**What this sweep does not establish.** One separable question, one corpus, one model, hand-written sub-questions, 5 runs. That is enough to say fan-out has no measured case in its favour and one measured case against it; it is not enough to say fan-out never helps. Treat it as the reason `questions` is no longer recommended, not as a proof that it is worthless. Note also that the single explorer's recall spread widened at these defaults — min 0.00 on two questions, against a median of 1.00 — so "recall 1.00" is a median, never a guarantee.
+
+One number moved in the wrong direction and is recorded rather than buried: quote fabrication was **62 of 1,275 checkable quotes (4.9%)** in this sweep, against 2.9% in the first. Against the gate as it stood when this sweep ran — fail at any non-zero rate — it failed, and the artifact records that failure. The gate has since become a ratchet at 6% plus a check that every failure reaches the main agent marked; 4.9% is the rate that ratchet was set from, so it is a ceiling against further drift and not a pass mark.
+
 ### Caveats — read these before believing the table
 
 - **One model, one corpus.** Everything above is `openai/gpt-5.6-luna` on `~/claude-plus-plus`. The citation contract is a prompt, and a different model may hold it better or worse; the latency ratio depends on that model's per-turn latency against its own tool-calling speed. Run `BENCH_MODEL=... BENCH_REPO=... npm run bench` before assuming these numbers transfer.
-- **Every benchmark question was saturated by one explorer.** That is why fan-out looks like pure waste here. It means the data shows fan-out is wasteful *on questions one explorer already covers*, and says **nothing** about genuinely separable ones — the corpus never produced one. Do not read the fan-out row as "fan-out is always waste"; read it as "fan-out was never tested on the case it was designed for". See [the open question](#open-question-is-fan-out-ever-worth-it).
+- **One separable question, tested once.** Four of the five benchmark questions are saturated by a single explorer, which is why fan-out looks like pure waste on them. The fifth, `bash-approval`, was built to be the case fan-out exists for, and fan-out lost it — at 2.3x the cost, with recall 0.80 against 1.00. That is one question, on one corpus, with hand-written sub-questions: evidence against fan-out where there used to be none, not a closed case. See [the open question](#open-question-is-fan-out-ever-worth-it).
 - **Comment-only quotes are verified more loosely than code quotes.** That is the 0.364% escape class above. A fidelity number therefore reads stronger for a report made mostly of prose than for one made of code. Tightening it would trade the escapes for false fabrication reports on legitimately re-wrapped comments, which is a worse failure for a detector whose whole value is being believed.
-- **Measured with `maxTurnsPerExplorer: 5`, which is no longer the default.** 7 of the 40 explorer-arm runs exceeded that budget and were scored as failures — among them all 5 fan-out runs on `persistence`, which is why the fan-out comparison rests on three questions rather than four. Those runs completed normally, so the latency and cost figures include them; it is the recall and precision sample sizes that shrank. The budget is 8 now precisely because of this, and the numbers have not been re-measured at 8.
+- **The first sweep was measured with `maxTurnsPerExplorer: 5`, which is no longer the default.** (The second sweep is at 8, and its numbers are the ones to compare against future runs.) 7 of the 40 explorer-arm runs exceeded that budget and were scored as failures — among them all 5 fan-out runs on `persistence`, which is why the fan-out comparison rests on three questions rather than four. Those runs completed normally, so the latency and cost figures include them; it is the recall and precision sample sizes that shrank. The budget is 8 now precisely because of this. The second sweep re-measured everything at 8 and scored 50 of 50 explorer-arm runs, so where the two sweeps disagree, prefer the second.
 - **Non-determinism.** 5 runs per question per arm, reported as medians with spread. A single run of this suite is not a measurement.
 
 ### Open question: is fan-out ever worth it?
 
-The fan-out path has measured evidence that it is wasteful on a saturated question — 3.6x the cost, worse precision, identical recall — and no evidence that it is ever useful, because no question in the corpus turned out to be genuinely separable. Absence of evidence in one direction is not evidence in the other, so the path stays and the guidance is conditioned on breadth rather than the path being removed.
+**Partially answered on 2026-09-11, and the answer is unfavourable.**
 
-The alternative that fits the data is **sequential escalation**: run one explorer, look at whether its `## Not Covered` section is non-trivial, and fan out only if it is. That trades one round-trip — paid only on the questions that need it — for the 3.6x multiplier currently paid up front on questions that do not. It is not implemented, and it needs a separable benchmark question to be evaluated against, which is the missing piece rather than the code.
+The question used to be unanswerable here: fan-out had measured evidence against it on saturated questions and no evidence either way on separable ones, because the corpus contained none. A separable question was then added — `bash-approval`, four subsystems, ~5,100 lines, sub-questions written to be derivable from the parent question alone — and fan-out lost that one too:
+
+| | saturated questions (4) | separable question (1) |
+|---|---|---|
+| recall, one explorer | 1.00 | **1.00** |
+| recall, four explorers | 1.00 | **0.80** |
+| cost, four vs one | **3.6x** | **2.3x** |
+| precision, four vs one | worse on all four | worse (0.235 vs 0.625) |
+
+So fan-out has **no measured case in its favour and one measured case against it**, including on the case it was designed for. The guidance now says exactly that: the tool description, the `promptGuidelines` and the `questions` parameter description all state that decomposition has no measured benefit, with the numbers attached.
+
+**The path is kept anyway**, and that is a judgement call rather than a conclusion from the data. One separable question, one corpus, one model and hand-written sub-questions is thin evidence for deleting code that is tested and working — and the same machinery is the substrate for the design that actually fits the data.
+
+That design is **sequential escalation**: run one explorer, look at whether its `## Not Covered` section is non-trivial, and fan out only if it is. It pays one extra round-trip on the questions that need it, in place of the 2.3–3.6x multiplier currently paid up front on questions that do not — and the measurement says the round-trip is much the cheaper of the two. **It is not implemented, and nothing here should be read as a decision to implement it**; it is recorded as the direction a future version should take, for a human to decide on. The honest alternative to it is removing `questions` outright, which is also on the table.
 
 ## Known limitations
 
 These were found while building it. They are trades, not bugs to be surprised by later.
 
-1. **Partition blindness.** Splitting the work by file cuts cross-file relationships. One explorer sees the caller, another sees the callee, and neither notices that they disagree. Directory-grouped bucketing keeps modules together and reduces this; no partition scheme eliminates it. The `## Architecture` and `## Not Covered` sections of each report are the mitigation, not a fix.
+1. **Partition blindness — now measured, not predicted.** Splitting the work cuts cross-file relationships. One explorer sees the caller, another sees the callee, and neither notices that they disagree. Directory-grouped bucketing keeps modules together and reduces this; no partition scheme eliminates it. The `## Architecture` and `## Not Covered` sections of each report are the mitigation, not a fix. On the one benchmark question whose answer spans four subsystems, four explorers missed the file holding the interactive approval prompt in 4 of 5 runs — one of the four had a sub-question aimed straight at it — while a single explorer on the whole question never missed it. This is the main reason `questions` is no longer recommended.
 
 2. **`concurrency` is an extension-wide ceiling, not a per-call one.** Both entry paths draw on the same budget. This is deliberate — a model can issue ten greps in one message, and a per-call limit would let ten hooks each land `concurrency` explorers on the machine at once — but the consequence is that a batch of ten promotable greps serializes at four explorers at a time rather than running wide.
 
@@ -325,7 +372,7 @@ These were found while building it. They are trades, not bugs to be surprised by
 
 7. **Per-category cost fields are zero.** Only `cost.total` is available per explorer, so the aggregated usage reports a total but leaves the input/output/cache cost split at zero. Token counts are broken out correctly; cost breakdowns attribute all explorer spend to the total.
 
-8. **Auto-promotion has never run against a real model.** Explorers themselves have now been exercised heavily — the benchmark has put 40 real exploration runs against `openai/gpt-5.6-luna` through spawn, streaming, the citation contract, re-anchoring and synthesis. What that did *not* cover is the `tool_result` hook path: no real `grep` has ever tripped the promotion gates, had its matches bucketed, spawned explorers and had its result replaced. Every gate and helper on that path is unit-tested (239 tests, including a stub subprocess emitting recorded pi JSON events, and a test that keeps `prompts/explorer.md` in sync with the citation parsers), and the pieces downstream of it are benchmarked, but the seam between them is untested end to end. The `explore` tool has the evidence; auto-promotion has the unit tests.
+8. **Auto-promotion has never run against a real model.** Explorers themselves have now been exercised heavily — the two benchmark sweeps have put 90 real exploration runs against `openai/gpt-5.6-luna` through spawn, streaming, the citation contract, re-anchoring and synthesis. What that did *not* cover is the `tool_result` hook path: no real `grep` has ever tripped the promotion gates, had its matches bucketed, spawned explorers and had its result replaced. Every gate and helper on that path is unit-tested (313 tests, including a stub subprocess emitting recorded pi JSON events, and a test that keeps `prompts/explorer.md` in sync with the citation parsers), and the pieces downstream of it are benchmarked, but the seam between them is untested end to end. The `explore` tool has the evidence; auto-promotion has the unit tests.
 
 9. **Brief file lists are capped at 40 paths per explorer.** A `find` sweep can return up to 1000 paths, and pasting hundreds of them into a prompt recreates inside the subprocess exactly the context bloat this extension exists to remove. When the cap bites, the explorer is told how many paths were withheld, so it reports on a sample knowingly rather than mistaking its slice for the whole set.
 
@@ -335,18 +382,18 @@ These were found while building it. They are trades, not bugs to be surprised by
 
 12. **Non-determinism.** Parallel LLM calls give different answers across runs. This makes behaviour harder to test and harder to trust than a mechanical index would be. It is visible in the benchmark: on the same question and arm, recall ranged 0.50–1.00 and latency 16.0s–17.7s across five runs, which is why every number here is a median over five and never a single run.
 
-13. **`explore` without `questions` is not parallel.** There is no planner subagent, so a call that supplies only `question` runs exactly one explorer. That is the recommended default — fan-out was measured costing 3.6x for identical recall on questions one explorer already covered — but it does mean the explicit tool path fans out only as wide as the caller decomposed, while auto-promotion always fans out because it partitions a known file list. See "`questions`: when to fan out, and what it costs" above.
+13. **`explore` without `questions` is not parallel, and that is now the recommendation rather than a shortfall.** There is no planner subagent, so a call that supplies only `question` runs exactly one explorer. Fan-out was measured costing 3.6x for identical recall on questions one explorer already covered, and 2.3x for *lower* recall on the one question that genuinely spanned subsystems, so the explicit tool path being single-threaded by default costs nothing that has been measured. It does mean the parallelism in this extension is reached almost entirely through auto-promotion, which always fans out because it partitions a known file list. See "[`questions`: measured, and not recommended](#questions-measured-and-not-recommended)" above.
 
 14. **The turn budget is advisory.** pi exposes no turn-limit flag, so `maxTurnsPerExplorer` is a sentence in the task text, not a mechanism. Explorers exceed it — 7 of 40 benchmark runs went over the then-default budget of 5 — and the only hard stops are `timeoutMs` and the model's own context limit. Do not treat it as a bound on cost or latency.
 
-15. **It does not make the main agent faster.** Every configuration measured was slower than plain pi: 1.16x for one explorer, 1.36x for four, with the baseline ahead on all four questions. The design once treated speed as a hard requirement; it was tested and it failed, and the goal has been retired rather than restated more weakly. The win is context, recall and verifiable citations, and it is bought with latency and cost. See [What it trades](#what-it-trades).
+15. **It does not make the main agent faster.** Every configuration measured was slower than plain pi: 1.16x for one explorer and 1.36x for four in the first sweep, with the baseline ahead on all four questions; 1.08x for both in the second sweep, with the baseline ahead on four of five. The design once treated speed as a hard requirement; it was tested and it failed, and the goal has been retired rather than restated more weakly. The win is context, recall and verifiable citations, and it is bought with latency and cost. See [What it trades](#what-it-trades).
 
 ## Development
 
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (239 tests)
+npm test             # vitest (313 tests)
 npm run typecheck:tests
 npm run bench        # real model calls — see Benchmark, not part of npm test
 ```

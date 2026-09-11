@@ -52,38 +52,47 @@ export const CONFIG_FILE_NAME = "fast-explorer.json";
  * What the model reads before deciding whether to call explore at all.
  *
  * Exported so the wording is pinned by a test rather than living only inside a
- * registration call. The cost figure is deliberate: the model is choosing
- * between one subprocess and four, and it cannot weigh that without a number.
+ * registration call. The cost figures are deliberate: the model is choosing
+ * between one subprocess and four, and it cannot weigh that without numbers.
+ *
+ * This used to recommend `questions` for a question spanning separable areas of
+ * the codebase. That recommendation has since been measured on exactly that case
+ * and it lost — see the note on `buildBriefs` — so the wording states the
+ * measurement instead of a preference. Not "never helps", which we have not
+ * shown; "no measured benefit", which is what the data supports.
  */
 export const EXPLORE_DESCRIPTION =
 	"Investigate code spanning many files using parallel read-only explorers. " +
 	"Returns cited findings (file:line) instead of raw file contents. " +
-	"One explorer is the default and covers most questions on its own. Supply " +
-	"`questions` only when the question spans separable areas of the codebase — " +
-	"distinct subsystems, or facets that have to be looked for in different places. " +
-	"Each sub-question is another subprocess: four explorers cost about 3.6x one, " +
-	"and on a question one explorer already covers they find the same files while " +
-	"citing more of the wrong ones.";
+	"One explorer is the default: pass `question` alone. `questions` runs one " +
+	"explorer per entry and has no measured benefit — on questions a single " +
+	"explorer already covered it cost about 3.6x for identical recall and worse " +
+	"precision, and on the one question measured whose answer genuinely spanned " +
+	"four subsystems it cost 2.3x and found LESS (recall 0.80 against 1.00). " +
+	"Supply it only for a reason the measurement has not tested.";
 
 /**
  * pi appends these to the system prompt flat, with no tool-name grouping, so
  * every bullet has to name `explore` or it reads as advice about nothing.
  *
- * The decomposition bullet is conditional but not hedged into uselessness: it
- * carries a worked example of a question that does split and one that does not.
- * Guidance vague enough that the model can never tell which side it is on gets
- * ignored, and would leave the fan-out path dead code.
+ * The decomposition bullet names the parameter and then argues against reaching
+ * for it, rather than omitting it. A parameter the schema advertises and the
+ * guidance never mentions is a trap: the model finds it anyway and has nothing
+ * to weigh it with. This wording gives it the number instead.
  */
 export const EXPLORE_PROMPT_GUIDELINES = [
 	"Use explore when you need to understand code spanning more than ~5 files.",
-	"Call explore with `question` alone by default — one explorer covers most questions, " +
-		"and splitting a question it already covers into four costs about 3.6x as much for " +
-		"the same findings and worse precision.",
-	"Give explore 2-4 `questions` when the question spans separable areas of the codebase " +
-		"that one explorer could not cover well — distinct subsystems, or facets that live in " +
-		"different places. 'How does session auth work end to end' splits into minting, " +
-		"request-time validation and refresh, which sit in different files; 'how does the " +
-		"parser work' does not split just because it can be phrased three ways.",
+	"Call explore with `question` alone by default — one explorer is the configuration " +
+		"with evidence behind it, and it matched or beat four explorers on recall on every " +
+		"benchmark question.",
+	"Do not split a question into `questions` for explore hoping for better coverage: " +
+		"decomposition has no measured benefit. On questions one explorer already covered, " +
+		"four explorers cost about 3.6x for identical recall and worse precision; on the one " +
+		"question measured whose answer genuinely spanned separable areas of the codebase — " +
+		"four subsystems, ~5,100 lines — four explorers cost 2.3x and scored LOWER recall " +
+		"(0.80 against 1.00), missing the same file in 4 of 5 runs though a sub-question " +
+		"aimed straight at it. Each explorer covers its slice and stops, so what connects " +
+		"the slices is what goes missing.",
 	"Do not use explore when you already know the exact file and line you need.",
 ];
 
@@ -92,12 +101,24 @@ export const EXPLORE_PROMPT_GUIDELINES = [
  * critical path: the main agent is already reasoning when it calls explore, so
  * it can decompose in the turn it already occupies.
  *
- * The fallback to a single brief is the common case, not a degraded one.
- * Measured on a real repository, four explorers cost 3.6x one for identical
- * recall and *worse* precision whenever one explorer already covered the
- * question — the extra three had nothing left to find and only diluted the
- * citations. Decomposition pays when the briefs land in genuinely different
- * parts of the tree; see EXPLORE_PROMPT_GUIDELINES.
+ * The fallback to a single brief is the common case, not a degraded one — and
+ * on the evidence it is the better one everywhere it has been measured.
+ * `bench/results/2026-09-11T05-44-05.json`, 5 questions x 3 arms x 5 runs:
+ * fan-out never beat one explorer on recall and was worse on precision on all
+ * five. On the four questions one explorer saturated it cost 3.6x for identical
+ * recall. On `bash-approval` — added to give fan-out its best case, an answer
+ * spanning four subsystems and ~5,100 lines — it cost 2.3x and scored LOWER
+ * recall (0.80 against 1.00), missing `interactiveHandler.ts` in 4 of 5 runs
+ * despite a sub-question aimed squarely at it. That is partition blindness,
+ * measured: each explorer covers its slice and stops, so the connective tissue
+ * between subsystems falls through.
+ *
+ * The path is kept anyway. One separable question on one corpus with one model
+ * is not enough to delete tested, working code, and the machinery is what a
+ * sequential-escalation design would run on — explore once, fan out only if the
+ * first report's `## Not Covered` is non-trivial. See the spec's "Open question:
+ * is fan-out ever worth it?". What changed is the advice: see
+ * EXPLORE_PROMPT_GUIDELINES.
  */
 export function buildBriefs(input: ExploreInput, maxFanout: number): string[] {
 	const supplied = (input.questions ?? []).map((q) => q.trim()).filter((q) => q.length > 0);
@@ -452,9 +473,11 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			questions: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
-						"Sub-questions, one per explorer. Only for a question spanning separable areas of " +
-						"the codebase — each entry is another subprocess, so a question one explorer can " +
-						"answer belongs in `question` alone.",
+						"Sub-questions, one per explorer. Not recommended: decomposition has no measured " +
+						"benefit. It cost 3.6x a single explorer for identical recall on questions one " +
+						"explorer already covered, and 2.3x for LOWER recall (0.80 against 1.00) on the one " +
+						"question measured whose answer genuinely spanned four subsystems. Leave this out " +
+						"and put the whole question in `question`.",
 				}),
 			),
 			scope: Type.Optional(Type.String({ description: "Glob or directory to limit the search" })),

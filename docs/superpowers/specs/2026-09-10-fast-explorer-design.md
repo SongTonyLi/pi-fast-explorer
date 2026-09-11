@@ -5,9 +5,13 @@
 **Package:** `pi-fast-explorer`
 
 Amendments are marked in place and dated rather than folded in silently, so a reader
-can tell which parts of this document were designed and which were measured. The
-largest is that the speed goal was falsified — see "Retired goal: speed
-(2026-09-11)".
+can tell which parts of this document were designed and which were measured. Two are
+large enough to name here, and both went against the design:
+
+- The speed goal was falsified — see "Retired goal: speed (2026-09-11)".
+- The parallelism argument lost on the one question built to test it. Fan-out is no
+  longer recommended anywhere in the shipped text — see "Open question: is fan-out
+  ever worth it?".
 
 ## Problem
 
@@ -91,14 +95,20 @@ explore({
 reasoning when it decides to explore, so it can decompose the problem **in the same
 turn**. The planner is the fallback, not the default.
 
-**Amended 2026-09-11.** This section said `promptGuidelines` "instructs the model to
-supply `questions` whenever it can". That advice was measured wrong: on a question a
-single explorer already covers, four explorers cost 3.6x for identical recall and
-worse precision. The guidelines now condition decomposition on the question spanning
-separable areas of the codebase, and omitting `questions` — one explorer — is the
-documented default. Removing a round-trip is a saving on a split you had a reason to
-make; it is not a reason to make the split. See "Open question: is fan-out ever
-worth it?".
+**Amended 2026-09-11 (first sweep).** This section said `promptGuidelines` "instructs
+the model to supply `questions` whenever it can". That advice was measured wrong: on a
+question a single explorer already covers, four explorers cost 3.6x for identical
+recall and worse precision. The guidelines then conditioned decomposition on the
+question spanning separable areas of the codebase, and omitting `questions` — one
+explorer — became the documented default. Removing a round-trip is a saving on a split
+you had a reason to make; it is not a reason to make the split.
+
+**Amended again 2026-09-11 (second sweep).** The replacement advice was itself measured,
+on exactly the case it named, and it lost. `bash-approval` — an answer spanning four
+subsystems and ~5,100 lines — cost 2.3x with four explorers and returned *lower* recall
+than one (0.80 against 1.00). The guidelines no longer condition decomposition on
+anything: they state that decomposition has no measured benefit and give the numbers.
+The path is kept, unrecommended. See "Open question: is fan-out ever worth it?".
 
 `promptGuidelines` must name the tool explicitly — "Use explore when you need to
 understand code spanning more than ~5 files" — because pi appends guideline bullets
@@ -125,6 +135,13 @@ Shape-dependent — the input determines the split.
 Path A uses `questions` when the caller supplied them. Only when it did not, and the
 question cannot be split heuristically by `scope` or directory structure, does it
 fall back to a planner call producing `[{ brief, globs }]`.
+
+**Amended 2026-09-11.** The Path A row of that table is the design's weakest claim.
+"The right split is conceptual" was never measured to produce a better answer, and
+where it has now been measured it produced a worse one — the conceptual split lost
+the file that sits between two of its concepts. Path B's row survived measurement;
+Path A's did not. No planner shipped, which in hindsight avoided building machinery
+for a split that does not pay. See "Open question: is fan-out ever worth it?".
 
 Fan-out is determined per path:
 
@@ -304,9 +321,10 @@ These reduce the latency fast-explorer costs. None of them makes it negative.
 1. **Thinking off** (`--thinking off`) while inheriting the model. Largest single
    reduction in per-turn latency, and it costs no relevance quality.
 2. **No blocking planner.** `questions` lets the main agent decompose in the turn it
-   already occupies, removing a serial round-trip from the critical path. This is a
-   saving on a split worth making, not a reason to split — see the 2026-09-11
-   amendment under "Trigger".
+   already occupies, removing a serial round-trip from the critical path. This lever
+   has since gone quiet: no split has been measured that was worth making, so the
+   round-trip it saves is one that need not be taken at all. See the two 2026-09-11
+   amendments under "Trigger".
 3. **`maxFanout == concurrency`.** Guarantees one wave, so wall-clock is the slowest
    single explorer rather than the sum of two batches.
 4. **Turn budget plus parallel-tool instruction.** `prompts/explorer.md` directs
@@ -395,38 +413,99 @@ wider margin than the 5x the criterion asked for. The benchmark therefore falsif
 the headline and confirmed the footnote, which is an argument for keeping both in a
 spec rather than only the one that sounds better.
 
+**Re-measured in the second sweep**, at the current defaults and over 5 questions:
+1.08x slower for one explorer and 1.08x for four (24,256 ms baseline, 26,117 ms and
+26,116 ms), with the baseline ahead on four questions of five. The gap narrowed; it
+did not close, and the retired goal stays retired.
+
 ### Open question: is fan-out ever worth it?
+
+**Partially answered 2026-09-11, and the answer is unfavourable. Recorded here as a
+dated finding next to the retired speed goal, because it falsifies this design's
+central parallelism argument the same way the benchmark falsified its speed goal.**
 
 Fan-out is the configuration this design argues for most strongly, and it is the one
 with the worst evidence.
 
-Measured, four explorers on a single question cost 3.6x as much as one ($0.0629 vs
-$0.0176 per run), ran 1.17x slower (19,051 ms vs 16,276 ms), matched the single
-explorer's recall exactly on every question both arms scored (median 1.00), and had
-consistently worse precision (per-question medians 0.12–0.29 against 0.25–0.67)
-because four explorers cite more files and dilute the ones that matter.
+The first sweep (`bench/results/2026-09-11T04-37-10.json`) measured four explorers on
+a single question costing 3.6x as much as one ($0.0629 vs $0.0176 per run), running
+1.17x slower, matching the single explorer's recall exactly on every question both
+arms scored (median 1.00), with consistently worse precision because four explorers
+cite more files and dilute the ones that matter. But every question in that sweep was
+**saturated by one explorer**, so the evidence was asymmetric: wasteful on saturated
+questions, nothing at all about separable ones. The path existed for the separable
+case and the separable case had not been tested.
 
-But every benchmark question turned out to be **saturated by one explorer**. So the
-evidence is asymmetric in a way that is easy to over-read: there is measured
-evidence that fan-out is wasteful on a saturated question, and **no evidence at all**
-about a genuinely separable one, because the corpus never produced such a question.
-The fan-out path exists for the separable case and that case has not been tested.
+#### The separable case, tested (2026-09-11, second sweep)
 
-Two consequences, both taken:
+`bench/results/2026-09-11T05-44-05.json` — same corpus, same model, current defaults,
+5 questions × 5 runs × 3 arms, 75 runs, no failures. A fifth question was added for
+this purpose: `bash-approval`, "when a shell command needs approval, how is that
+decided, how is the user asked, and how is an 'always allow' answer remembered?". Its
+answer lives in four separate top-level subsystems of `~/claude-plus-plus`, about
+5,100 lines — rule evaluation, shell rule matching, the interactive ask, the UI. Its
+four sub-questions were hand-written to be derivable from the parent question alone,
+so the fan-out arm held no advantage a real caller could not have had.
 
-1. `promptGuidelines` now condition decomposition on breadth — supply `questions`
-   only when the question spans separable areas of the codebase — rather than
-   advising it whenever decomposition is possible.
-2. The path is kept. Removing it would be acting on the absence of evidence as
-   though it were evidence of absence.
+Per-question medians over 5 runs, scored by which ground-truth files the answer names
+(the cross-arm scorer: a baseline answers in prose and cites nothing in the explorer
+format, so citation-based recall is not comparable across arms):
 
-The alternative that fits the data is **sequential escalation**: run one explorer,
-inspect its `## Not Covered` section, and fan out only when that section is
-non-trivial. That pays one extra round-trip on the questions that need it, in place
-of the 3.6x multiplier currently paid up front on questions that do not. It is not
-implemented. The blocker is not the code — it is that the benchmark corpus contains
-no separable question to evaluate either arm against, so building it now would be
-building against the same missing measurement.
+| arm | recall | precision | median latency | cost/run |
+|---|---|---|---|---|
+| baseline (no extension) | **1.00** | 0.50 | **26,075 ms** | **$0.0296** |
+| explorer (one) | **1.00** | **0.625** | 32,916 ms | $0.0373 |
+| fanout (four) | **0.80** | 0.235 | 35,154 ms | $0.0872 |
+
+Fan-out lost its own best case. It was the only arm below 1.00 recall in the median
+run, and it missed the same file —
+`src/hooks/toolPermission/handlers/interactiveHandler.ts` — in **4 of 5 runs**, with
+one of its four sub-questions ("how is the approval request presented to the user")
+aimed squarely at it. The single explorer missed a ground-truth file in 1 run of 5
+and never missed that one.
+
+**"Partition blindness", listed under "Known limitations" since this spec was
+written, is therefore no longer a predicted risk. It is a measured effect.** Each
+explorer covers its slice and stops; what connects the slices is what falls through.
+The concurrency pool is not the explanation — per-question speedup medians were
+2.98–3.56x on four explorers, near the ceiling of 4.
+
+On the other four questions the first sweep replicated at the current defaults:
+fan-out at 3.6x the single explorer's cost ($0.0671 vs $0.0184 per run) for identical
+recall, with worse precision on all five questions.
+
+#### Limits of this evidence
+
+One separable question, one corpus, one model, hand-written sub-questions, 5 runs. It
+establishes that fan-out has no measured case in its favour and one measured case
+against it. It does **not** establish that fan-out never helps, and this section
+should not be read as though it did.
+
+#### Consequences
+
+1. The guidance no longer conditions decomposition on anything. The tool
+   description, `promptGuidelines` and the `questions` parameter description all
+   state that decomposition has no measured benefit, with the 3.6x and 2.3x figures
+   and the 4-of-5 miss attached. Nothing in the shipped text recommends `questions`.
+2. **The path is kept, unrecommended.** n = 1 on the separable case is too thin to
+   delete tested, working code, and the fan-out machinery is exactly what the design
+   below would run on. This is a judgement call, not a conclusion from the data; the
+   honest alternative is removing `questions` outright.
+
+#### The design that fits the data
+
+**Sequential escalation**: run one explorer, inspect its `## Not Covered` section, and
+fan out only when that section is non-trivial. It pays one extra round-trip on the
+questions that need it, in place of the 2.3–3.6x multiplier currently paid up front
+on questions that do not — and the measurement now says which of those two is the
+expensive one. The blocker named here used to be that the corpus contained no
+separable question; that blocker is gone, and `bash-approval` is the question to
+evaluate it against.
+
+**This is recorded as the direction a future version should take, and it is
+deliberately not implemented.** Whether to build it — or to remove `questions`
+instead — is a product decision for a human, not something to fold into the
+documentation pass that recorded the result.
 
 ### Open question: in-process explorers
 
@@ -467,10 +546,15 @@ the `subagent` example being installed, so there is no install-order coupling.
 These are accepted, not solved. They are recorded so they are not rediscovered as
 surprises.
 
-- **Partition blindness.** Splitting by file guarantees some cross-file
-  relationships are cut. Explorer A sees the caller, explorer B sees the callee,
-  neither notices a signature mismatch. Directory-grouped bucketing and the
-  `## Architecture` section reduce this; no partition scheme eliminates it.
+- **Partition blindness — measured on 2026-09-11, no longer a prediction.** Splitting
+  by file guarantees some cross-file relationships are cut. Explorer A sees the
+  caller, explorer B sees the callee, neither notices a signature mismatch.
+  Directory-grouped bucketing and the `## Architecture` section reduce this; no
+  partition scheme eliminates it. On the one benchmark question whose answer spans
+  four subsystems, four explorers missed the file holding the interactive approval
+  prompt in 4 of 5 runs — one of the four briefs pointed straight at it — while a
+  single explorer on the whole question never missed it. This is now the main reason
+  `questions` is documented as not recommended.
 - **Explorers do not know what they do not know.** The main agent holds the whole
   conversation; an explorer gets one brief. It will miss adjacent-but-relevant code.
 - **Duplicated reading.** Every explorer reads the shared `types.ts` and `index.ts`.
@@ -496,11 +580,15 @@ surprises.
   starting guess: nothing in the benchmark exercises them, because the benchmark
   calls explorers directly rather than through the hook.
 - **It is slower than not using it.** Measured 1.16x for one explorer and 1.36x for
-  four, with the unaided baseline ahead on every question. This was a goal until
-  2026-09-11 and is now a limitation; see "Retired goal: speed (2026-09-11)".
-- **The parallelism argument is untested.** Fan-out has measured evidence of being
-  wasteful on saturated questions and no evidence of being useful on separable ones,
-  because the corpus contains none. See "Open question: is fan-out ever worth it?".
+  four in the first sweep, with the unaided baseline ahead on every question; 1.08x
+  for both in the second, with the baseline ahead on four of five. This was a goal
+  until 2026-09-11 and is now a limitation; see "Retired goal: speed (2026-09-11)".
+- **The parallelism argument was tested and it lost.** Fan-out is wasteful on
+  saturated questions (3.6x the cost, identical recall) and, on the one separable
+  question the corpus now contains, it cost 2.3x for *lower* recall than a single
+  explorer. The design's central parallelism claim has no measured case in its favour.
+  The path is kept, unrecommended, on n = 1. See "Open question: is fan-out ever worth
+  it?".
 - **Loss of incidental learning.** When the main agent reads files itself it absorbs
   conventions it was not looking for. Delegation eliminates that serendipity.
 
@@ -545,9 +633,9 @@ backstop for everything else. This spec does not depend on any compaction work.
 - **A benchmark suite** measuring speed *and* quality against a real repository.
   Specified in full below.
 
-As built: 239 unit tests across 17 files, plus the benchmark. The end-to-end fixture
+As built: 313 unit tests across 18 files, plus the benchmark. The end-to-end fixture
 test in the third bullet was **not** written — the benchmark subsumed it for the
-`explore` path, which now has 40 real explorer runs behind it. It did not subsume it
+`explore` path, which now has 90 real explorer runs behind it across two sweeps. It did not subsume it
 for the auto-promotion path: no real `grep` result has ever tripped the `tool_result`
 hook, been bucketed, spawned explorers and had its content replaced. That seam is
 covered by unit tests on each side of it and by nothing that crosses it.
@@ -589,6 +677,21 @@ area of the repo:
 | 2 | Where are large tool results persisted, and how is the preview built? | `utils/toolResultStorage.ts` |
 | 3 | How does the per-message budget avoid breaking the prompt cache? | `utils/toolResultStorage.ts`, `services/api/promptCacheBreakDetection.ts` |
 | 4 | How does the agent event tracking system record and expose events? | `services/agentTracker.ts`, `server/dashboard.ts` |
+
+Question 5 was added on 2026-09-11, after the first sweep showed that all four of the
+above were saturated by a single explorer and that fan-out had therefore never been
+tested on the case it exists for:
+
+| # | Question | Ground truth |
+|---|---|---|
+| 5 | When a shell command needs approval, how is that decided, how is the user asked, and how is an "always allow" answer remembered? | `utils/permissions/permissions.ts`, `tools/BashTool/bashPermissions.ts`, `hooks/toolPermission/handlers/interactiveHandler.ts`, `components/permissions/BashPermissionRequest/BashPermissionRequest.tsx`, `utils/permissions/PermissionUpdate.ts` |
+
+Its answer spans four top-level subsystems and about 5,100 lines, and its four
+sub-questions are derivable from the parent question alone — no corpus knowledge —
+so the fan-out arm gets no advantage a real caller could not have had. It was chosen
+because the code is shaped that way, not to give fan-out a win, and the result is
+recorded under "Open question: is fan-out ever worth it?" whichever way it fell. It
+fell against fan-out.
 
 ### Metrics
 
@@ -655,8 +758,13 @@ exploration as low precision. Measured, they separated cleanly and in opposite
 directions: the explorer's recall median was 1.00 on all four questions against a
 baseline median of 0.50–1.00, while its precision was *worse* than the baseline's on
 all four (0.25–0.67 against 0.29–1.00). Over-eager exploration is real and
-visible; partition blindness did not appear, because no question was separable
-enough to partition.
+visible.
+
+Partition blindness did not appear in that sweep, because no question was separable
+enough to partition. It appeared as soon as one was: on `bash-approval` in the second
+sweep, the fan-out arm's recall fell to 0.80 against the single explorer's 1.00, with
+the same file missing in 4 of 5 runs. Low recall under partitioning is exactly the
+signature this metric pair was built to catch, and it caught it.
 
 ### Method
 
@@ -677,14 +785,18 @@ Recorded because these are the limits of every number this spec now quotes.
   quote fidelity are properties of that model as much as of this design; the latency
   ratio depends on that model's per-turn latency. `BENCH_MODEL` and `BENCH_REPO`
   exist so this can be rerun, not so the result can be assumed to transfer.
-- **No separable question.** Every question in the set was saturated by a single
-  explorer, which is why fan-out measures as pure waste and why the design's central
-  parallelism argument is still untested. This is a gap in the corpus, not a finding.
-  See "Open question: is fan-out ever worth it?".
-- **Measured at `maxTurnsPerExplorer: 5`.** The default is 8 now, changed because of
-  what this run showed, and nothing has been re-measured at 8. The affected runs
-  completed normally, so latency and cost include them; what shrank is the number of
-  runs that scored — 33 of 40.
+- **One separable question, measured once.** Four of the five questions are saturated
+  by a single explorer, which is why fan-out measures as pure waste on them. The
+  fifth was added to test the case the design's parallelism argument rests on, and
+  fan-out lost it — but that is one question, one corpus, one model, and
+  hand-written sub-questions. It is evidence against fan-out where there used to be
+  none; it is not a demonstration that fan-out never helps. See "Open question: is
+  fan-out ever worth it?".
+- **The first sweep was measured at `maxTurnsPerExplorer: 5`.** The default is 8 now,
+  changed because of what that run showed. The affected runs completed normally, so
+  latency and cost include them; what shrank is the number of runs that scored — 33
+  of 40. The second sweep is at 8 and scored 50 of 50, so the two sweeps' latency and
+  cost figures are comparable but their failure columns are not.
 - **Answer sufficiency was never implemented.** The LLM-judge rubric in the metrics
   table above does not exist in the suite. Everything reported is mechanical.
 

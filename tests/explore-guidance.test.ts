@@ -4,17 +4,23 @@ import { EXPLORE_DESCRIPTION, EXPLORE_PROMPT_GUIDELINES } from "../src/index.js"
 /**
  * This text is the only thing standing between a question one explorer answers
  * and four subprocesses answering it four times. Measured against a real
- * repository: four explorers cost 3.6x one ($0.0629 vs $0.0176) for identical
- * recall (1.00 both), with *worse* precision (0.12-0.50 vs 0.25-0.67), because
- * four explorers cite more files and dilute what matters. The guidance used to
- * tell the model to decompose whenever it could, which bought that trade on
- * every call.
+ * repository: four explorers cost 3.6x one for identical recall (1.00 both),
+ * with *worse* precision, because four explorers cite more files and dilute what
+ * matters. The guidance used to tell the model to decompose whenever it could,
+ * which bought that trade on every call.
  *
- * These tests pin the two properties that make the new wording work, and they
- * pull in opposite directions on purpose:
- *   - it must discourage reflexive fan-out, with a number attached; and
- *   - it must still leave a case the model can recognise as worth fanning out,
- *     or the fan-out path is dead code and the concurrency pool is decoration.
+ * The second sweep (`bench/results/2026-09-11T05-44-05.json`) added a question
+ * whose answer genuinely spans four subsystems — fan-out's best case, and the
+ * case the guidance then steered toward. Fan-out lost it too: 2.3x the cost for
+ * recall 0.80 against the single explorer's 1.00, missing the same ground-truth
+ * file in 4 of 5 runs though a sub-question pointed straight at it.
+ *
+ * So these tests pin a different pair of properties than they used to, still
+ * pulling in opposite directions:
+ *   - the guidance must discourage fan-out, with the numbers attached; and
+ *   - it must still NAME `questions`, because the schema advertises the
+ *     parameter. Guidance that never mentions a parameter the model can see is
+ *     worse than guidance that argues against it.
  */
 const WHY =
 	"the explore guidance is the whole control over fan-out cost. Changing it " +
@@ -43,9 +49,13 @@ describe("explore tool guidance", () => {
 		expect(EXPLORE_PROMPT_GUIDELINES.join("\n"), WHY).toContain("3.6x");
 	});
 
-	it("conditions decomposition on separable areas, not on phrasing", () => {
+	it("reports the separable case as measured and lost, not as the trigger", () => {
 		const guidance = EXPLORE_PROMPT_GUIDELINES.join("\n");
+		// The phrase survives, but it now labels the case fan-out was tested on
+		// and lost — it is no longer the condition under which to fan out.
 		expect(guidance, WHY).toContain("separable areas of the codebase");
+		expect(guidance, WHY).toMatch(/2\.3x/);
+		expect(guidance, WHY).toMatch(/4 of 5 runs/);
 		// The old wording. "if you can decompose the task" is satisfied by any
 		// question at all, which is why it cost 3.6x on questions that did not
 		// need it.
@@ -53,14 +63,19 @@ describe("explore tool guidance", () => {
 	});
 
 	/**
-	 * The opposite failure mode, and the more expensive one to diagnose: guidance
-	 * so hedged that the model never decomposes, leaving fan-out unreachable and
-	 * the measured 3.0-3.3x pool speedup unused. A concrete question that SHOULD
-	 * be split has to survive in the text, not just a warning against splitting.
+	 * The failure mode this replaced: guidance carrying a worked example of a
+	 * question that "deserves" fan-out, kept so the path would not be dead text.
+	 * That example is gone because measurement took its side of the argument away
+	 * — the one genuinely separable question tested is where fan-out lost worst.
+	 *
+	 * What remains worth pinning is that `questions` is still named. The
+	 * parameter is in the tool schema whether or not the guidance mentions it, so
+	 * silence would leave the model to reach for it with nothing to weigh.
 	 */
-	it("keeps a worked example of a question that does deserve fan-out", () => {
+	it("names `questions` rather than pretending the parameter is absent", () => {
 		const guidance = EXPLORE_PROMPT_GUIDELINES.join("\n");
-		expect(guidance, WHY).toMatch(/splits into/);
-		expect(guidance, WHY).toMatch(/2-4 `questions`/);
+		expect(guidance, WHY).toContain("`questions`");
+		expect(EXPLORE_DESCRIPTION, WHY).toContain("`questions`");
+		expect(EXPLORE_DESCRIPTION, WHY).toMatch(/no measured benefit/);
 	});
 });
