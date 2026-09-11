@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeFanout } from "../src/partition.js";
+import { bucketByDirectory, computeFanout } from "../src/partition.js";
 
 describe("computeFanout", () => {
 	it("floors at 2", () => {
@@ -16,5 +16,30 @@ describe("computeFanout", () => {
 
 	it("never exceeds maxFanout even when maxFanout is below the floor", () => {
 		expect(computeFanout(100, 1)).toBe(1);
+	});
+});
+
+describe("bucketByDirectory", () => {
+	it("keeps a directory's files together", () => {
+		const files = ["a/1.ts", "a/2.ts", "a/3.ts", "b/1.ts", "b/2.ts", "c/1.ts"];
+		const buckets = bucketByDirectory(files, 3);
+		const bucketOf = (f: string) => buckets.findIndex((b) => b.includes(f));
+		expect(bucketOf("a/1.ts")).toBe(bucketOf("a/2.ts"));
+		expect(bucketOf("a/1.ts")).toBe(bucketOf("a/3.ts"));
+		expect(bucketOf("b/1.ts")).toBe(bucketOf("b/2.ts"));
+	});
+
+	it("places every file exactly once", () => {
+		const files = ["a/1.ts", "a/2.ts", "b/1.ts", "c/1.ts", "d/1.ts"];
+		const flat = bucketByDirectory(files, 3).flat().sort();
+		expect(flat).toEqual([...files].sort());
+	});
+
+	it("drops empty buckets", () => {
+		expect(bucketByDirectory(["a/1.ts"], 4)).toEqual([["a/1.ts"]]);
+	});
+
+	it("returns empty for no files", () => {
+		expect(bucketByDirectory([], 3)).toEqual([]);
 	});
 });
