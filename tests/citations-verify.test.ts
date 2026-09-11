@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { verifyCitation, verifyQuote } from "../src/citations.js";
+import { extractQuotes, verifyCitation, verifyQuote } from "../src/citations.js";
 
 const dir = mkdtempSync(join(tmpdir(), "fx-cite-"));
 writeFileSync(join(dir, "a.ts"), "one\ntwo\nthree\nfour\n");
@@ -115,5 +115,56 @@ describe("verifyQuote", () => {
 		const r = verifyQuote({ file: "c.ts", startLine: 9, code: "alpha\nbeta" }, dir);
 		expect(r.valid).toBe(true);
 		expect(r.actualLine).toBe(1);
+	});
+});
+
+/** Written out rather than inlined so the fences below stay readable. */
+const F = "```";
+
+/**
+ * Splitting a fenced block at every `// path:line` line is a bet: it rescues
+ * grouped excerpts, and it mis-cuts a quote whose own code contains a line of
+ * that shape. Both directions are pinned here, because a heuristic added later
+ * to win the second case would silently lose the first — which is the bug the
+ * split exists to fix.
+ */
+describe("splitting grouped blocks, verified against disk", () => {
+	it("verifies both excerpts of a grouped block that used to fail as one", () => {
+		const report = [`${F}text`, "// a.ts:1", "one", "two", "", "// a.ts:3", "three", "four", F].join(
+			"\n",
+		);
+		const quotes = extractQuotes(report);
+		expect(quotes).toHaveLength(2);
+		for (const q of quotes) expect(verifyQuote(q, dir).valid).toBe(true);
+		expect(quotes.map((q) => verifyQuote(q, dir).drift)).toEqual([0, 0]);
+	});
+
+	it("would score that same block as fabricated if it were read as one quote", () => {
+		// The unsplit reading: the second header is swallowed as a line of code,
+		// so the quote can never match. This is the artifact being removed, and it
+		// is asserted so that regressing the split shows up as this test failing.
+		const code = "one\ntwo\n\n// a.ts:3\nthree\nfour";
+		const asOneQuote = verifyQuote({ file: "a.ts", startLine: 1, code }, dir);
+		expect(asOneQuote.valid).toBe(false);
+		expect(asOneQuote.reason).toMatch(/fabricated/i);
+	});
+
+	it("mis-cuts a quote whose own source contains a header-shaped comment", () => {
+		// The accepted cost. `d.ts` really does contain the line `// e.ts:12`, so
+		// the split fires inside a single honest excerpt. Zero lines of the 3.4M
+		// in the reference corpus have this shape, which is why the split is
+		// unconditional; this test records what it costs when that bet loses.
+		writeFileSync(join(dir, "d.ts"), "head\n// e.ts:12\ntail\n");
+		const report = [`${F}text`, "// d.ts:1", "head", "// e.ts:12", "tail", F].join("\n");
+		const quotes = extractQuotes(report);
+		expect(quotes).toEqual([
+			{ file: "d.ts", startLine: 1, code: "head" },
+			{ file: "e.ts", startLine: 12, code: "tail" },
+		]);
+		// The head still verifies. The tail is checked against the file the stray
+		// comment named, which does not exist, so it is reported rather than
+		// quietly passed.
+		expect(verifyQuote(quotes[0]!, dir).valid).toBe(true);
+		expect(verifyQuote(quotes[1]!, dir).reason).toMatch(/file not found/i);
 	});
 });

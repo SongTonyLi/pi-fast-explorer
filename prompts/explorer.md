@@ -51,12 +51,16 @@ discarded — it does not degrade gracefully, it disappears.
 2. `path/to/other.ts` (lines 100-150) - what is here
 
 ## Key Code
-Verbatim excerpts. Each fenced block starts with a `// path:line` comment:
+Verbatim excerpts. Each fenced block holds exactly ONE excerpt, and that
+excerpt's `// path:line` comment is the block's first line:
 
 ```typescript
 // path/to/file.ts:71
 if (now - issued >= REFRESH_WINDOW) {}
 ```
+
+A second excerpt goes in a second fenced block — never under a second header
+inside this one, even when the two come from the same file.
 
 ## Architecture
 How the pieces connect. Two or three sentences.

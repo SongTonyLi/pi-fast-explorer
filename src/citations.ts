@@ -35,7 +35,7 @@ export function extractCitations(report: string): Citation[] {
 }
 
 const FENCE = /```[^\n]*\n([\s\S]*?)```/g;
-// First line of the block, e.g. "// src/auth/session.ts:71". Group 1 is the
+// An excerpt's anchor line, e.g. "// src/auth/session.ts:71". Group 1 is the
 // comment prefix, kept so a rewritten anchor keeps the block's own style.
 const HEADER = /^(\s*(?:\/\/|#)\s*)([^\s:]+):(\d+)\s*$/;
 
@@ -54,16 +54,79 @@ function parseHeader(line: string | undefined): RegExpExecArray | null {
 	return HEADER.exec((line ?? "").replace(UNVERIFIED_MARKER, ""));
 }
 
+/**
+ * One `// path:line` header inside a fenced block, with the code beneath it.
+ *
+ * `headerIndex` is the header's position in the block body, so `reanchorReport`
+ * can rewrite that one line and leave every other byte of the block alone.
+ */
+interface Excerpt {
+	headerIndex: number;
+	prefix: string;
+	file: string;
+	startLine: number;
+	code: string;
+}
+
+/**
+ * Splits a fenced block's body into one excerpt per `// path:line` header.
+ *
+ * Models routinely group several related excerpts into ONE fence, each under its
+ * own header. Reading only the first header made every later line — including
+ * the literal text of the second header — part of a single quote, and that quote
+ * can never match the file. An honest grouped excerpt was therefore scored as
+ * fabricated: 5 of the 20 fabrications on the reference corpus were this.
+ *
+ * Every header-shaped line splits, with no attempt to tell our format apart from
+ * a source comment that happens to look like one. The cost of guessing wrong is
+ * real — a quote cut at a line that was genuinely part of the code loses that
+ * line from verification, and if the comment names some other file the fragment
+ * below it is checked against that file and reported as fabricated. The reason
+ * to accept that risk is how rare the shape is. `HEADER` is anchored at both
+ * ends and admits nothing but `path:number`, so the way code actually
+ * cross-references a location — `// see src/foo.ts:12 for why` — does not match.
+ * Scanning the 3.4M lines of the reference corpus for lines that do match found
+ * zero. Against that, grouping was 5 of 189 blocks in one benchmark run and cost
+ * 4 false fabrications.
+ *
+ * Nor is there a safe heuristic to reach for. Every rule that would suppress a
+ * split — same file as the block header, ascending line numbers, must follow a
+ * blank line — is one that real grouping also breaks, so it would reintroduce
+ * the bug in exactly the cases it claimed to protect.
+ */
+function splitExcerpts(bodyLines: readonly string[]): Excerpt[] {
+	const heads: { index: number; match: RegExpExecArray }[] = [];
+	for (const [index, line] of bodyLines.entries()) {
+		const match = parseHeader(line);
+		if (match) heads.push({ index, match });
+	}
+	// A block that does not open with a header is not a cited block at all, and a
+	// header found further down does not make it one.
+	if (heads[0]?.index !== 0) return [];
+
+	return heads.map(({ index, match }, i) => ({
+		headerIndex: index,
+		prefix: match[1]!,
+		file: match[2]!,
+		startLine: Number(match[3]),
+		// Up to the next header, or the end of the block for the last excerpt. A
+		// header with only blank lines under it yields an empty quote, which
+		// `verifyQuote` rejects rather than counting as verified.
+		code: bodyLines
+			.slice(index + 1, heads[i + 1]?.index ?? bodyLines.length)
+			.join("\n")
+			.replace(/\n+$/, ""),
+	}));
+}
+
 export function extractQuotes(report: string): Quote[] {
 	const out: Quote[] = [];
 	FENCE.lastIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = FENCE.exec(report)) !== null) {
-		const lines = m[1]!.split("\n");
-		const header = parseHeader(lines[0]);
-		if (!header) continue;
-		const code = lines.slice(1).join("\n").replace(/\n+$/, "");
-		out.push({ file: header[2]!, startLine: Number(header[3]), code });
+		for (const { file, startLine, code } of splitExcerpts(m[1]!.split("\n"))) {
+			out.push({ file, startLine, code });
+		}
 	}
 	return out;
 }
@@ -294,43 +357,48 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 	while ((m = FENCE.exec(report)) !== null) {
 		const body = m[1]!;
 		const bodyLines = body.split("\n");
-		const header = parseHeader(bodyLines[0]);
 		// Not a cited block. Leave it byte-for-byte alone.
-		if (!header) continue;
+		const excerpts = splitExcerpts(bodyLines);
+		if (excerpts.length === 0) continue;
 
-		const prefix = header[1]!;
-		const file = header[2]!;
-		const stated = Number(header[3]);
-		const code = bodyLines.slice(1).join("\n").replace(/\n+$/, "");
-		const result = verifyQuote({ file, startLine: stated, code }, cwd);
-		const key = `${file}:${stated}`;
+		// Each excerpt is judged on its own and only its own header line is
+		// touched, so one unverifiable excerpt cannot mark the honest ones beside
+		// it and every other byte of the block survives unchanged.
+		const rewritten = [...bodyLines];
+		let changed = false;
+		for (const { headerIndex, prefix, file, startLine, code } of excerpts) {
+			const result = verifyQuote({ file, startLine, code }, cwd);
+			const key = `${file}:${startLine}`;
 
-		let headerLine: string | null = null;
-		if (result.valid && result.actualLine !== undefined) {
-			recordAnchor(verified, key, result.actualLine);
-			if (result.drift !== 0) {
-				headerLine = `${prefix}${file}:${result.actualLine}`;
-				corrected++;
+			if (result.valid && result.actualLine !== undefined) {
+				recordAnchor(verified, key, result.actualLine);
+				if (result.drift !== 0) {
+					rewritten[headerIndex] = `${prefix}${file}:${result.actualLine}`;
+					corrected++;
+					changed = true;
+				}
+			} else if (result.reason?.startsWith("empty quote")) {
+				// A header with no body: nothing to verify, and nothing for the
+				// caller to be misled by either. Marking it would be noise,
+				// correcting it would be a guess.
+			} else {
+				recordAnchor(verified, key, null);
+				const marker = result.reason?.startsWith("file not found")
+					? UNVERIFIED_NO_FILE
+					: UNVERIFIED_NOT_FOUND;
+				rewritten[headerIndex] =
+					bodyLines[headerIndex]!.replace(UNVERIFIED_MARKER, "").replace(/\s+$/, "") + marker;
+				fabricated++;
+				changed = true;
 			}
-		} else if (result.reason?.startsWith("empty quote")) {
-			// A header with no body: nothing to verify, and nothing for the caller
-			// to be misled by either. Marking it would be noise, correcting it
-			// would be a guess.
-		} else {
-			recordAnchor(verified, key, null);
-			const marker = result.reason?.startsWith("file not found")
-				? UNVERIFIED_NO_FILE
-				: UNVERIFIED_NOT_FOUND;
-			headerLine = bodyLines[0]!.replace(UNVERIFIED_MARKER, "").replace(/\s+$/, "") + marker;
-			fabricated++;
 		}
-		if (headerLine === null) continue;
+		if (!changed) continue;
 
 		// m[0] is `opening fence line + body + "```"`, so this recovers the
 		// opening fence with its language tag intact.
 		const openLine = m[0].slice(0, m[0].length - body.length - 3);
 		out += report.slice(cursor, m.index);
-		out += `${openLine}${[headerLine, ...bodyLines.slice(1)].join("\n")}\`\`\``;
+		out += `${openLine}${rewritten.join("\n")}\`\`\``;
 		cursor = m.index + m[0].length;
 	}
 	out += report.slice(cursor);

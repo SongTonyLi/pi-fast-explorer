@@ -141,3 +141,71 @@ describe("reanchorReport", () => {
 		expect(out.fabricated).toBe(0);
 	});
 });
+
+/**
+ * `reanchorReport` is what the caller actually reads, so it has to split grouped
+ * blocks the same way `extractQuotes` does. If only the extractor were fixed the
+ * benchmark would score a grouped block clean while the shipped report still
+ * stamped it UNVERIFIED — the gate and the artifact disagreeing about the same
+ * text, which is worse than either being wrong on its own.
+ */
+describe("reanchorReport on blocks holding several excerpts", () => {
+	const grouped = [
+		`${F}typescript`,
+		"// src/session.ts:1",
+		"const REFRESH = 900;",
+		"if (now() - issued >= REFRESH) {}",
+		"",
+		"// src/session.ts:5",
+		"export const done = true;",
+		"",
+		"// src/session.ts:40",
+		"const INVENTED = neverWritten();",
+		F,
+		"",
+	].join("\n");
+	const result = reanchorReport(grouped, dir);
+
+	it("corrects the drifted excerpt without touching the correct one", () => {
+		expect(result.report).toContain("// src/session.ts:3\nconst REFRESH = 900;");
+		expect(result.report).toContain("// src/session.ts:5\nexport const done = true;");
+	});
+
+	it("marks only the unverifiable excerpt, not the block around it", () => {
+		expect(result.report).toContain("// src/session.ts:40 — UNVERIFIED: not found in file");
+		expect(result.report).not.toContain("// src/session.ts:3 — UNVERIFIED");
+		expect(result.report).not.toContain("// src/session.ts:5 — UNVERIFIED");
+		expect(result.corrected).toBe(1);
+		expect(result.fabricated).toBe(1);
+	});
+
+	it("keeps the block's fence, language tag and code bytes intact", () => {
+		expect(result.report).toContain(`${F}typescript\n// src/session.ts:3`);
+		expect(result.report).toContain("const INVENTED = neverWritten();");
+		expect(result.report.split(F)).toHaveLength(grouped.split(F).length);
+	});
+
+	it("produces identical text on a second pass", () => {
+		const again = reanchorReport(result.report, dir);
+		expect(again.report).toBe(result.report);
+		expect(again.corrected).toBe(0);
+		expect(again.fabricated).toBe(1);
+	});
+
+	it("leaves a grouped block alone when every excerpt is already correct", () => {
+		const clean = [
+			`${F}ts`,
+			"// src/session.ts:3",
+			"const REFRESH = 900;",
+			"",
+			"// src/session.ts:5",
+			"export const done = true;",
+			F,
+			"",
+		].join("\n");
+		const out = reanchorReport(clean, dir);
+		expect(out.report).toBe(clean);
+		expect(out.corrected).toBe(0);
+		expect(out.fabricated).toBe(0);
+	});
+});
