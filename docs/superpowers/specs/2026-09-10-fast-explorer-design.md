@@ -1,8 +1,13 @@
 # fast-explorer — Design
 
 **Date:** 2026-09-10
-**Status:** Approved for planning
+**Status:** Implemented; amended 2026-09-11 against benchmark results
 **Package:** `pi-fast-explorer`
+
+Amendments are marked in place and dated rather than folded in silently, so a reader
+can tell which parts of this document were designed and which were measured. The
+largest is that the speed goal was falsified — see "Retired goal: speed
+(2026-09-11)".
 
 ## Problem
 
@@ -28,9 +33,16 @@ sweep has already been paid for many times over.
 - Never destroy information — every finding carries a `file:line` citation, and raw
   data remains reachable on disk.
 - Require no change to how the user works.
-- **Make the main agent faster, measurably** — both on the exploration turn itself
-  and on every turn after it. This is a hard requirement with an acceptance test,
-  not an expected side effect. See "Performance".
+- **Reduce what the main agent carries, measurably** — the tokens a sweep leaves in
+  context, not the time the sweep takes. This is a hard requirement with an
+  acceptance test. See "Performance and context".
+
+**Amended 2026-09-11.** The last bullet read "**Make the main agent faster,
+measurably** — both on the exploration turn itself and on every turn after it. This
+is a hard requirement with an acceptance test, not an expected side effect." It was
+measured and it is false. The goal has been removed rather than weakened, and
+replaced by the one it was always supposed to be serving: the context reduction,
+which is the part that held. See "Retired goal: speed (2026-09-11)".
 
 ## Non-goals
 
@@ -75,10 +87,18 @@ explore({
 })
 ```
 
-`questions` exists for latency. The main agent is already reasoning when it decides
-to explore, so it can decompose the problem **in the same turn**, eliminating a
-blocking planner round-trip entirely. `promptGuidelines` instructs the model to
-supply `questions` whenever it can. The planner is the fallback, not the default.
+`questions` exists to avoid a blocking planner round-trip. The main agent is already
+reasoning when it decides to explore, so it can decompose the problem **in the same
+turn**. The planner is the fallback, not the default.
+
+**Amended 2026-09-11.** This section said `promptGuidelines` "instructs the model to
+supply `questions` whenever it can". That advice was measured wrong: on a question a
+single explorer already covers, four explorers cost 3.6x for identical recall and
+worse precision. The guidelines now condition decomposition on the question spanning
+separable areas of the codebase, and omitting `questions` — one explorer — is the
+documented default. Removing a round-trip is a saving on a split you had a reason to
+make; it is not a reason to make the split. See "Open question: is fan-out ever
+worth it?".
 
 `promptGuidelines` must name the tool explicitly — "Use explore when you need to
 understand code spanning more than ~5 files" — because pi appends guideline bullets
@@ -182,7 +202,9 @@ model and thinking level unless configured otherwise. This preserves relevance
 judgment: a weaker model deciding what matters in unfamiliar code is the single
 largest quality risk in this architecture, and inheritance removes it. The
 consequence is that the cost saving largely disappears — the remaining wins are
-context, latency, and cache preservation. Users who want the cost saving can set
+context, recall and verifiable citations. (This sentence read "context, latency, and
+cache preservation" until 2026-09-11; latency is a cost here, not a win, and cache
+preservation was never measured.) Users who want the cost saving can set
 `model` explicitly to a cheaper one.
 
 ### Synthesis
@@ -213,7 +235,7 @@ in its entirety.
   "thinking": "off",
   "maxFanout": 4,
   "concurrency": 4,
-  "maxTurnsPerExplorer": 5,
+  "maxTurnsPerExplorer": 8,
   "minTotalBytes": 51200,
   "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
   "timeoutMs": 120000
@@ -221,7 +243,14 @@ in its entirety.
 ```
 
 `model: null` means inherit from the dispatching session. `minTotalBytes` is the
-bail-out floor described under "Performance".
+bail-out floor described under "Performance and context".
+
+`maxTurnsPerExplorer` was 5 here until 2026-09-11. It is 8 because 5 was measured
+converting successes into failures — 7 of 40 benchmark explorer runs exceeded it,
+every one of them by landing on exactly 6 turns. It is also **advisory in a way this
+spec did not anticipate**: pi exposes no turn-limit flag, so the number rides in the
+task text as a request the model is free to exceed. Nothing in this design bounds
+turn count; the only hard stops are `timeoutMs` and the model's own context limit.
 
 **Loading.** Config is resolved at every `session_start` from layers, lowest
 precedence first:
@@ -239,10 +268,11 @@ choosing and `timeoutMs` could stall the session, neither with any prompt to the
 user. An invalid file is reported and ignored — the previously resolved config stays
 in effect, rather than being silently replaced by the defaults.
 
-## Performance
+## Performance and context
 
-Making the main agent faster is a requirement, so the latency budget is specified
-rather than assumed.
+Reducing what the main agent carries is the requirement. Latency is a cost to be
+kept small, not a benefit to be claimed — see "Retired goal: speed (2026-09-11)",
+which is where this section used to argue otherwise.
 
 ### Where the time actually goes
 
@@ -258,16 +288,25 @@ explorer wall-clock ≈ (turns per explorer) × (per-turn latency)
 ```
 
 Fan-out width barely appears in it. **Parallelism across explorers does not reduce
-the number of sequential LLM turns inside any one explorer.** Optimising for speed
-therefore means minimising turns per explorer and per-turn latency, not widening the
-fan-out. Every lever below follows from that.
+the number of sequential LLM turns inside any one explorer.** Keeping the latency
+cost small therefore means minimising turns per explorer and per-turn latency, not
+widening the fan-out. Every lever below follows from that.
+
+This analysis survived measurement; the conclusion drawn from it did not. Fan-out
+was measured at 3.0–3.3x speedup against sequential execution of the same four
+explorers — near the ceiling of 4 — and was still 1.36x slower end to end than the
+unaided baseline, exactly as the relationship above predicts.
 
 ### Levers, in order of impact
+
+These reduce the latency fast-explorer costs. None of them makes it negative.
 
 1. **Thinking off** (`--thinking off`) while inheriting the model. Largest single
    reduction in per-turn latency, and it costs no relevance quality.
 2. **No blocking planner.** `questions` lets the main agent decompose in the turn it
-   already occupies, removing a serial round-trip from the critical path.
+   already occupies, removing a serial round-trip from the critical path. This is a
+   saving on a split worth making, not a reason to split — see the 2026-09-11
+   amendment under "Trigger".
 3. **`maxFanout == concurrency`.** Guarantees one wave, so wall-clock is the slowest
    single explorer rather than the sum of two batches.
 4. **Turn budget plus parallel-tool instruction.** `prompts/explorer.md` directs
@@ -281,26 +320,113 @@ fan-out. Every lever below follows from that.
 ### The durable win
 
 Independent of the exploration turn, every subsequent turn in the session carries a
-smaller context, so prefill and time-to-first-token drop for the rest of the
-session. It also postpones auto-compaction, which is a multi-second synchronous
-stall. This compounds, and it is the larger effect over a long session — but it is
-deliberately not the only justification, because a design that is slower at the
-moment the user is watching is a design that feels slow.
+smaller context. It also postpones auto-compaction, which is a multi-second
+synchronous stall. This compounds, and it is now the *only* justification, because
+the per-sweep latency effect was measured going the other way.
+
+The shape of the trade is what makes it worth taking anyway: the latency and the
+cost are paid once, at the sweep, while the tokens would otherwise be paid on every
+turn after it. Measured, a baseline sweep left 23,896–48,956 tokens of file contents
+in the main context; an explorer report is 1,100–1,382 tokens. The explorer's own
+reading is spent in a subprocess and discarded on exit, so it never enters the main
+context at all — which is why per-run cost and per-run context are different
+measurements and must not be collapsed into one.
 
 ### Acceptance criteria
 
-These are falsifiable and belong in the test suite, not in the README:
+One criterion remains, unchanged from the original three. It is falsifiable and is
+measured by the benchmark suite described under "Benchmark", not asserted by hand.
 
-- On the fixture repository, `explore` over a ~40-file sweep completes in **no more
-  wall-clock than the unaided main agent** performing the same sweep.
 - Main-agent context after exploration is **at least 5× smaller** than after the
-  unaided sweep.
-- Median per-turn time-to-first-token for the ten turns following exploration is
-  **lower** than for the ten turns following an unaided sweep.
+  unaided sweep. **Met on 2026-09-11** — 20.3–35.7x measured.
 
-If the first criterion fails, the guard rails are wrong and the thresholds move —
-the feature must not ship as a latency regression. These are measured by the
-benchmark suite described under "Benchmark", not asserted by hand.
+The other two were both about speed. One was measured and failed; the other was
+never implemented. Neither has been replaced. No new criterion has been added in
+their place, deliberately: writing a fresh acceptance bar after seeing the results,
+and choosing one the results clear, would be a way of passing rather than a way of
+being tested. Recall, precision, citation validity and quote fidelity are all
+measured and reported by the benchmark, but as observations, not as bars that were
+set in advance.
+
+### Retired goal: speed (2026-09-11)
+
+This design listed "make the main agent faster, measurably" as a goal and carried an
+acceptance criterion for it: *`explore` over a ~40-file sweep completes in no more
+wall-clock than the unaided main agent performing the same sweep*. There was a third
+criterion too, on time-to-first-token over the ten turns after a sweep.
+
+The first was measured on 2026-09-11 and **failed**. Corpus `~/claude-plus-plus`,
+model `openai/gpt-5.6-luna`, 4 questions × 5 runs × 3 arms, recorded in
+`bench/results/2026-09-11T04-37-10.json`:
+
+| arm | median latency | vs baseline | cost/run |
+|---|---|---|---|
+| baseline (plain pi) | 13,983 ms | — | $0.0122 |
+| explorer (one) | 16,276 ms | 1.16x slower | $0.0176 |
+| fanout (four) | 19,051 ms | 1.36x slower | $0.0629 |
+
+The baseline was faster on every question in every configuration — not a marginal
+loss on the aggregate, a clean sweep. The guard rails were not wrong and moving the
+thresholds would not have helped: the concurrency pool measured 3.0–3.3x against
+sequential execution of the same four explorers, against a ceiling of 4, and the
+remaining gap is per-explorer fixed overhead plus the turns × latency relationship
+above — neither of which a threshold touches.
+
+The TTFT criterion was never implemented, so it is retired as unmeasured rather than
+as failed. It remains plausible on the mechanism — a smaller context does prefill
+faster — but this design should not carry an unmeasured claim next to a falsified
+one.
+
+What this changes:
+
+- The goal is **removed**, not softened into "roughly as fast" or "fast enough". A
+  design record that quietly drops a falsified goal is less useful than one that
+  never made the claim, because the reader cannot tell which claims were tested.
+- "The durable win" is promoted from a supporting argument to the whole argument.
+  The old text said the context effect was "deliberately not the only
+  justification". It is now the only justification, and the honest framing is a
+  trade with a losing side, not a win.
+- The levers under "Levers, in order of impact" stay. They were never about beating
+  the baseline; they are about how much the extension costs, and 1.16x is the number
+  they bought.
+
+The context claim, which was the secondary argument, held by 20.3–35.7x — a much
+wider margin than the 5x the criterion asked for. The benchmark therefore falsified
+the headline and confirmed the footnote, which is an argument for keeping both in a
+spec rather than only the one that sounds better.
+
+### Open question: is fan-out ever worth it?
+
+Fan-out is the configuration this design argues for most strongly, and it is the one
+with the worst evidence.
+
+Measured, four explorers on a single question cost 3.6x as much as one ($0.0629 vs
+$0.0176 per run), ran 1.17x slower (19,051 ms vs 16,276 ms), matched the single
+explorer's recall exactly on every question both arms scored (median 1.00), and had
+consistently worse precision (per-question medians 0.12–0.29 against 0.25–0.67)
+because four explorers cite more files and dilute the ones that matter.
+
+But every benchmark question turned out to be **saturated by one explorer**. So the
+evidence is asymmetric in a way that is easy to over-read: there is measured
+evidence that fan-out is wasteful on a saturated question, and **no evidence at all**
+about a genuinely separable one, because the corpus never produced such a question.
+The fan-out path exists for the separable case and that case has not been tested.
+
+Two consequences, both taken:
+
+1. `promptGuidelines` now condition decomposition on breadth — supply `questions`
+   only when the question spans separable areas of the codebase — rather than
+   advising it whenever decomposition is possible.
+2. The path is kept. Removing it would be acting on the absence of evidence as
+   though it were evidence of absence.
+
+The alternative that fits the data is **sequential escalation**: run one explorer,
+inspect its `## Not Covered` section, and fan out only when that section is
+non-trivial. That pays one extra round-trip on the questions that need it, in place
+of the 3.6x multiplier currently paid up front on questions that do not. It is not
+implemented. The blocker is not the code — it is that the benchmark corpus contains
+no separable question to evaluate either arm against, so building it now would be
+building against the same missing measurement.
 
 ### Open question: in-process explorers
 
@@ -352,15 +478,29 @@ surprises.
   across reports.
 - **Fixed overhead per explorer** — spawn, system prompt, tool definitions,
   `AGENTS.md` — paid N times. The fan-out floor and `minTotalBytes` exist to prevent
-  this dominating; in-process explorers may remove it entirely (see "Performance").
+  this dominating; in-process explorers may remove it entirely (see "Performance and
+  context"). Measured, this overhead is most of the reason the extension is slower
+  than the baseline, which makes the in-process question the one open item with a
+  plausible path to closing that gap.
 - **Latency floor set by the slowest explorer.** One explorer that needs five turns
   makes the whole sweep five turns long, however many others finished in one.
-  Bucketing aims for balance but cannot guarantee it.
+  Bucketing aims for balance but cannot guarantee it. Measured: four explorers ran at
+  3.0–3.3x the sequential time of the same four, against a ceiling of 4 — the missing
+  0.7–1.0 is this.
 - **Non-determinism.** Parallel LLM calls give different answers across runs, which
-  makes behaviour harder to test and to trust.
+  makes behaviour harder to test and to trust. Measured on one question and arm,
+  recall ranged 0.50–1.00 across five runs.
 - **Auto-promote false positives.** A grep the model intended as a quick existence
-  check becomes an 8-second exploration. Threshold tuning is real work and the
-  defaults are a starting guess, not a validated answer.
+  check becomes an exploration — measured at a 16.3s median for one explorer, not the
+  8s guessed here. Threshold tuning is real work and the defaults are still a
+  starting guess: nothing in the benchmark exercises them, because the benchmark
+  calls explorers directly rather than through the hook.
+- **It is slower than not using it.** Measured 1.16x for one explorer and 1.36x for
+  four, with the unaided baseline ahead on every question. This was a goal until
+  2026-09-11 and is now a limitation; see "Retired goal: speed (2026-09-11)".
+- **The parallelism argument is untested.** Fan-out has measured evidence of being
+  wasteful on saturated questions and no evidence of being useful on separable ones,
+  because the corpus contains none. See "Open question: is fan-out ever worth it?".
 - **Loss of incidental learning.** When the main agent reads files itself it absorbs
   conventions it was not looking for. Delegation eliminates that serendipity.
 
@@ -370,10 +510,13 @@ Encoded as guard rails in the tool description and the auto-promote threshold:
 
 - Total candidate bytes below `minTotalBytes` (default 50KB) — reading directly is
   both faster and higher fidelity
-- Fewer than ~8 candidate files
+- Fewer than ~5 candidate files (as shipped; this said ~8 when it was a guess, and
+  the tool description says "more than ~5 files")
 - The agent already knows the exact file and line
 - Edit-heavy rather than search-heavy work
 - Interactive debugging where the agent needs to iterate on real output
+- Latency-sensitive work in a short session, where the context saving never has
+  enough turns to repay the 1.16x it costs up front
 
 ## Relationship to other designs
 
@@ -401,6 +544,13 @@ backstop for everything else. This spec does not depend on any compaction work.
   rather than asserting on model prose, which is non-deterministic.
 - **A benchmark suite** measuring speed *and* quality against a real repository.
   Specified in full below.
+
+As built: 239 unit tests across 17 files, plus the benchmark. The end-to-end fixture
+test in the third bullet was **not** written — the benchmark subsumed it for the
+`explore` path, which now has 40 real explorer runs behind it. It did not subsume it
+for the auto-promotion path: no real `grep` result has ever tripped the `tool_result`
+hook, been bucketed, spawned explorers and had its content replaced. That seam is
+covered by unit tests on each side of it and by nothing that crosses it.
 
 ## Benchmark
 
@@ -465,13 +615,48 @@ blank-line placement do not count. Models reliably reflow indentation when quoti
 into a report, and scoring that as a hallucination would make the detector cry wolf
 on citations that are in fact correct — a detector nobody trusts blocks nothing.
 Fabricated, paraphrased or mislocated content still fails, which is the property the
-metric exists for. Any non-zero hallucination rate is a
-release blocker — a confidently wrong citation is worse than no citation, because
-the main agent will trust it and skip verifying.
+metric exists for. Any non-zero hallucination rate is a release blocker — a
+confidently wrong citation is worse than no citation, because the main agent will
+trust it and skip verifying.
+
+**Two corrections to the paragraph above, from implementation and measurement.**
+
+*Mislocated content does not fail, and should not.* "Quote fidelity below 1.0 fails"
+turned out to be un-shippable for the right reason: it conflated invented code with
+a correct excerpt carrying a wrong line number, and the second was the overwhelming
+majority. On the first recorded sweep, of 131 failing quotes, 111 were drift and 20
+were invention. So `verifyQuote` searches the whole file rather than only the stated
+line, and `reanchorReport` — which runs at request time in `synthesize`, not only in
+the benchmark — rewrites the anchor to where the code actually is. Drift is reported
+and not gated, because gating on a defect that is already corrected automatically is
+gating on nothing. The gate is invented, misattributed, missing-file and empty
+content only.
+
+*The gate is red, and the package shipped anyway.* Measured on 2026-09-11, 15 of 520
+quote blocks (2.9%) named content the cited file does not contain, and the gate is
+defined to fail at any non-zero count — so the recorded run fails it. This
+contradicts "release blocker" as written. It is recorded rather than quietly
+softened: the mitigation in place is that such a block reaches the main agent marked
+`UNVERIFIED` or `MISATTRIBUTED` on its own fence header rather than being removed or
+silently passed, which makes a bad citation visible but does not make it zero.
+
+*The verifier has a known soft spot.* Validated by injecting 49,985 mutations into
+known-good quotes: 182 escaped (0.364%), every one an all-comment quote where
+deleting a word still leaves a contiguous verbatim run — which the `reflowed`
+verdict accepts by design. On quotes containing code, 43,777 mutations were injected
+and none escaped. Tightening it trades these escapes for false fabrication reports
+on legitimately re-wrapped comments, which is the worse failure for a detector whose
+only value is being believed. Recorded next to the fidelity number rather than
+fixed.
 
 Recall and precision together guard against the two failure modes named under
 "Known limitations": partition blindness shows up as low recall, over-eager
-exploration as low precision.
+exploration as low precision. Measured, they separated cleanly and in opposite
+directions: the explorer's recall median was 1.00 on all four questions against a
+baseline median of 0.50–1.00, while its precision was *worse* than the baseline's on
+all four (0.25–0.67 against 0.29–1.00). Over-eager exploration is real and
+visible; partition blindness did not appear, because no question was separable
+enough to partition.
 
 ### Method
 
@@ -482,6 +667,26 @@ exploration as low precision.
 - Results are written to `bench/results/<date>.json` and a summary table to stdout,
   so runs are comparable across commits.
 - Gate on wide margins. The suite exists to catch regressions, not jitter.
+
+### What the benchmark cannot tell you
+
+Recorded because these are the limits of every number this spec now quotes.
+
+- **One model, one corpus.** All results are `openai/gpt-5.6-luna` on
+  `~/claude-plus-plus`. The output contract is a prompt, so contract compliance and
+  quote fidelity are properties of that model as much as of this design; the latency
+  ratio depends on that model's per-turn latency. `BENCH_MODEL` and `BENCH_REPO`
+  exist so this can be rerun, not so the result can be assumed to transfer.
+- **No separable question.** Every question in the set was saturated by a single
+  explorer, which is why fan-out measures as pure waste and why the design's central
+  parallelism argument is still untested. This is a gap in the corpus, not a finding.
+  See "Open question: is fan-out ever worth it?".
+- **Measured at `maxTurnsPerExplorer: 5`.** The default is 8 now, changed because of
+  what this run showed, and nothing has been re-measured at 8. The affected runs
+  completed normally, so latency and cost include them; what shrank is the number of
+  runs that scored — 33 of 40.
+- **Answer sufficiency was never implemented.** The LLM-judge rubric in the metrics
+  table above does not exist in the suite. Everything reported is mechanical.
 
 ## Publishing
 
