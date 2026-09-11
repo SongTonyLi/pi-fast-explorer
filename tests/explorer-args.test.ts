@@ -18,8 +18,13 @@ describe("buildExplorerArgs", () => {
 			"read,grep,find,ls",
 			"--append-system-prompt",
 			"/tmp/p.md",
-			"Task: find auth",
+			"Task: find auth\n\nComplete this in at most 5 turns.",
 		]);
+	});
+
+	it("carries the configured turn budget into the task", () => {
+		const args = buildExplorerArgs(resolveConfig({ maxTurnsPerExplorer: 3 }), "m", "/tmp/p.md", "t");
+		expect(args.at(-1)).toBe("Task: t\n\nComplete this in at most 3 turns.");
 	});
 
 	it("never grants bash", () => {

@@ -21,7 +21,10 @@ export function buildExplorerArgs(
 	args.push("--thinking", cfg.thinking);
 	args.push("--tools", EXPLORER_TOOLS);
 	args.push("--append-system-prompt", promptPath);
-	args.push(`Task: ${task}`);
+	// pi has no turn-limit flag, so the budget rides along in the task text.
+	// A soft prompt-level bound is all that is available, but it at least makes
+	// the config key real rather than silently inert.
+	args.push(`Task: ${task}\n\nComplete this in at most ${cfg.maxTurnsPerExplorer} turns.`);
 	return args;
 }
 
@@ -120,15 +123,36 @@ export interface RunExplorerOptions {
 	cfg: FastExplorerConfig;
 	cwd: string;
 	signal?: AbortSignal;
-	onUpdate?: (partial: string) => void;
+	/**
+	 * Called with the entire report accumulated so far, re-emitted on every
+	 * chunk. Replace what you are holding; do not append, or the report will
+	 * duplicate itself.
+	 */
+	onProgress?: (report: string) => void;
 	/** Overridable so tests need not wait out the production grace period. */
 	sigkillGraceMs?: number;
 }
 
 const SIGKILL_GRACE_MS = 5000;
 
+/**
+ * `close` needs stdio EOF as well as process exit, and a grandchild that
+ * inherited the pipes keeps the write end open after the explorer itself is
+ * gone. After `exit` we allow this long for a clean drain, then finalize
+ * regardless. This timer is never unref'd: it is the last guarantee that the
+ * promise settles at all.
+ */
+const DRAIN_MS = 1000;
+
 /** Errors and stack traces land at the end of a stream, so we keep the tail. */
 const STDERR_TAIL_CHARS = 8192;
+
+/**
+ * Memory guard against a child that streams without ever emitting a newline.
+ * A partial line this large is already unparseable, so bounding growth costs
+ * nothing that was not lost anyway.
+ */
+const STDOUT_BUFFER_CHARS = 1_048_576;
 
 export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 	const {
@@ -138,7 +162,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		cfg,
 		cwd,
 		signal,
-		onUpdate,
+		onProgress,
 		sigkillGraceMs = SIGKILL_GRACE_MS,
 	} = opts;
 
@@ -158,10 +182,15 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		let stderr = "";
 		let buffer = "";
 		let settled = false;
+		let spawned = false;
 		let failure: string | undefined;
 		let graceTimer: ReturnType<typeof setTimeout> | undefined;
+		let drainTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const proc = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+		proc.on("spawn", () => {
+			spawned = true;
+		});
 
 		const kill = () => {
 			proc.kill("SIGTERM");
@@ -192,6 +221,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			settled = true;
 			clearTimeout(timer);
 			if (graceTimer) clearTimeout(graceTimer);
+			if (drainTimer) clearTimeout(drainTimer);
 			signal?.removeEventListener("abort", onAbort);
 			resolve(result);
 		};
@@ -206,40 +236,76 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			buffer += stdoutDecoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
+			if (buffer.length > STDOUT_BUFFER_CHARS) buffer = buffer.slice(-STDOUT_BUFFER_CHARS);
 			for (const line of lines) processLine(line, acc);
-			if (onUpdate) onUpdate(extractFinalText(acc));
+			if (onProgress) {
+				try {
+					onProgress(extractFinalText(acc));
+				} catch {
+					// A throwing consumer would otherwise become an uncaught
+					// exception in a 'data' handler and take down the host agent.
+				}
+			}
 		});
 
 		proc.stderr.on("data", (chunk: Buffer) => {
 			appendStderr(stderrDecoder.write(chunk));
 		});
 
+		// A pipe error is fatal to the host in exactly the same way. Windows in
+		// particular surfaces ECONNRESET here when a child is killed. Exit code,
+		// stopReason and an empty report remain the authoritative failure signals.
+		proc.stdout.on("error", () => {});
+		proc.stderr.on("error", () => {});
+
 		proc.on("error", (err) => {
-			finish({
-				brief,
-				report: "",
-				ok: false,
-				error: `Failed to spawn explorer: ${err.message}`,
-				usage: acc.usage,
-			});
+			if (!spawned) {
+				finish({
+					brief,
+					report: "",
+					ok: false,
+					error: `Failed to spawn explorer: ${err.message}`,
+					usage: acc.usage,
+				});
+				return;
+			}
+			// Post-spawn, 'error' also covers a failed kill. Settling here would
+			// clear the grace timer and abandon a child that is still alive, so
+			// record it and let exit/close decide.
+			failure ??= `Explorer process error: ${err.message}`;
 		});
 
-		proc.on("close", (code) => {
+		const finalize = (code: number | null, termSignal: NodeJS.Signals | null) => {
+			if (settled) return;
 			buffer += stdoutDecoder.end();
 			appendStderr(stderrDecoder.end());
 			if (buffer.trim()) processLine(buffer, acc);
 			const report = extractFinalText(acc);
+			const exited = termSignal ? `signal ${termSignal}` : `code ${code}`;
 			const error =
 				failure ??
-				(code !== 0
-					? `Explorer exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
-					: acc.stopReason === "error"
-						? (acc.errorMessage ?? "Explorer reported an error")
+				(code !== 0 || termSignal
+					? `Explorer exited with ${exited}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
+					: // Allow-list: pi's stopReason vocabulary also includes length,
+						// aborted, deferred and pending, every one of which means the
+						// brief was not fully covered.
+						acc.stopReason && acc.stopReason !== "stop"
+						? `Explorer stopped with reason "${acc.stopReason}"${
+								acc.errorMessage ? `: ${acc.errorMessage}` : ""
+							}`
 						: !report
 							? "Explorer produced no report"
 							: undefined);
 
 			finish({ brief, report, ok: !error, error, usage: acc.usage });
+		};
+
+		// Fast path: process exited and stdio reached EOF.
+		proc.on("close", (code, termSignal) => finalize(code, termSignal));
+
+		// Backstop: the process exited but something else still holds the pipes.
+		proc.on("exit", (code, termSignal) => {
+			drainTimer = setTimeout(() => finalize(code, termSignal), DRAIN_MS);
 		});
 	});
 }

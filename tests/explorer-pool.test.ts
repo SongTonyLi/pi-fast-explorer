@@ -13,7 +13,9 @@ describe("runWithConcurrency", () => {
 			return i;
 		});
 		const out = await runWithConcurrency(tasks, 3);
-		expect(peak).toBeLessThanOrEqual(3);
+		// Exactly 3, not "at most 3": a serial pool would satisfy <= and defeat
+		// the entire point of fanning out.
+		expect(peak).toBe(3);
 		expect(out).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 	});
 
