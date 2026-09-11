@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type QuoteVerdict, verifyQuote } from "../src/citations.js";
+import { MAX_VERIFY_BYTES, type QuoteVerdict, verifyQuote } from "../src/citations.js";
 
 /**
  * Every verdict weaker than `drifted` is a licence to call something real that
@@ -43,6 +43,27 @@ writeFileSync(
 		"",
 	].join("\n"),
 );
+
+/**
+ * A file just over the verification cap, written on first use.
+ *
+ * Lazy because it is four megabytes and only two tests need it. The content is
+ * real source, and the quote below is genuinely IN it — the point of `unread` is
+ * that a quote which would have verified comes back unchecked rather than
+ * verified, so the fixture has to be one that would otherwise pass.
+ */
+let hugePath: string | null = null;
+function hugeFile(): string {
+	if (hugePath === null) {
+		hugePath = join(dir, "huge.ts");
+		const filler = `const padding = "${"x".repeat(200)}"\n`;
+		writeFileSync(
+			hugePath,
+			`export const findMeInTheHugeFile = 1\n${filler.repeat(Math.ceil(MAX_VERIFY_BYTES / filler.length))}`,
+		);
+	}
+	return "huge.ts";
+}
 
 /** Twelve distinct lines, for quoting three of them from opposite ends. */
 writeFileSync(
@@ -548,6 +569,9 @@ describe("what `valid` means", () => {
 		// Not valid — nothing was verified. Also not a failure: see `checkable`
 		// below, which is what keeps it out of the gate.
 		["trivial", false],
+		// Same shape, different reason: the file was never opened, so there is
+		// nothing the caller can be told is real.
+		["unread", false],
 	];
 
 	const produce: Record<QuoteVerdict, () => boolean> = {
@@ -577,6 +601,9 @@ describe("what `valid` means", () => {
 		"missing-file": () => verifyQuote({ file: "nope.ts", startLine: 1, code: "anything" }, dir).valid,
 		empty: () => verifyQuote({ file: "elide.ts", startLine: 1, code: " " }, dir).valid,
 		trivial: () => verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir).valid,
+		unread: () =>
+			verifyQuote({ file: hugeFile(), startLine: 1, code: "export const findMeInTheHugeFile = 1" }, dir)
+				.valid,
 	};
 
 	for (const [verdict, valid] of cases) {
@@ -609,9 +636,10 @@ describe("what `checkable` means", () => {
 		"missing-file": true,
 		empty: true,
 		trivial: false,
+		unread: false,
 	};
 
-	it("counts everything but trivial", () => {
+	it("counts everything but trivial and unread", () => {
 		expect(verifyQuote({ file: "elide.ts", startLine: 1, code: "export type Entry = {" }, dir).checkable).toBe(
 			checkable.exact,
 		);
@@ -623,6 +651,10 @@ describe("what `checkable` means", () => {
 		);
 		expect(verifyQuote({ file: "elide.ts", startLine: 1, code: " " }, dir).checkable).toBe(checkable.empty);
 		expect(verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir).checkable).toBe(checkable.trivial);
+		expect(
+			verifyQuote({ file: hugeFile(), startLine: 1, code: "export const findMeInTheHugeFile = 1" }, dir)
+				.checkable,
+		).toBe(checkable.unread);
 	});
 
 	it("keeps a trivial quote out of both sides of the ratio", () => {

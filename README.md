@@ -120,12 +120,14 @@ The `files >= 3` floor on the density branch exists so that one file with a thou
 
 When both gates pass:
 
-1. The raw grep/find text is written to a spill file in the per-user temp directory, mode `0600`.
-2. The matched paths are re-anchored on the session cwd (grep and find emit paths relative to their own search root) and bucketed by directory into `clamp(ceil(files / 8), 2, maxFanout)` groups.
-3. One explorer runs per bucket, with a brief naming the pattern, the scope, and the total file count.
-4. The tool result the model sees is **replaced** by the synthesized findings, followed by the spill file path.
+1. The matched paths are re-anchored on the session cwd (grep and find emit paths relative to their own search root) and bucketed by directory into `clamp(ceil(files / 8), 2, maxFanout)` groups.
+2. One explorer runs per bucket, with a brief naming the pattern, the scope, and the total file count.
+3. **If every explorer failed, the hook returns nothing and your original search result is left exactly as it was.** No spill file is written, because nothing is being replaced and a file whose path nobody is told is litter.
+4. Otherwise the raw grep/find text is written to a spill file in the OS temp directory, mode `0600`, and the tool result the model sees is **replaced** by the synthesized findings, followed by the spill file path.
 
-Nothing is destroyed: the full match list is on disk and its path is in the result. The model can read it if the findings are not enough.
+Nothing is destroyed: either the match list is on disk with its path in the result, or the match list is still the result. The model can read the spill file if the findings are not enough.
+
+Step 3 is the whole of the failure story, and it is deliberately unconditional: whatever went wrong — `pi` not on `PATH`, a bad `model` or `thinking` value, a provider outage, or a pi release that changes a `stopReason` string this extension does not recognise — the worst case is that you paid for explorers and got your grep output, rather than paying for explorers and losing it.
 
 Briefs are phrased per source on purpose. A grep pattern carries real intent, so that brief leans on it. A glob carries none — `**/*.ts` says only "these are TypeScript files" — so that brief asks what the files *are* rather than inviting the explorer to invent a purpose. A shell command carries the most of the three, since `rg -n --glob '!node_modules' 'tool_use_id' src/` states the pattern, the exclusions and the scope in one string; that brief quotes the command as a statement of intent and tells the explorer not to run it, because explorers have no shell.
 
@@ -339,6 +341,8 @@ All six figures are the `quoteRates` object of `2026-09-11T04-37-10.json`: `quot
 
 Drift is corrected rather than gated: `synthesize` runs every report through `reanchorReport` before the main agent sees it, so a verbatim quote with a wrong line number arrives with the right one. What cannot be repaired is marked in place on the fence header — `UNVERIFIED`, `PARTIAL`, `MISATTRIBUTED`, `UNCHECKED` — rather than silently dropped or silently kept.
 
+**What the verifier can read, and what it says when it cannot.** A quote is verified when it sits in a fenced block (` ``` ` or `~~~`) whose first line is a comment naming `path:line`, opened with `//`, `#`, `--`, `;`, `%`, `<!--` or `/*` — so SQL, Lua, Haskell, HTML, CSS, Lisp, assembly, MATLAB and LaTeX excerpts are checked, not just TypeScript ones. Two cases fall outside that and neither is passed over in silence: a file larger than 4 MB is not read at all and its block is marked `UNCHECKED: cited file is too large to verify`, and a block inside a fence the model never closed cannot be delimited, so it is marked `UNCHECKED: unterminated code fence` and counted in `ReanchorResult.unparsed`. `findUnmarkedFailures` — the check that proves no failure reaches you unlabelled — reports an unparseable block as a finding rather than as a clean run, because a checker that cannot see a block has to say so.
+
 **The fabrication gate is defined to fail at any non-zero rate, and on this run it failed**, at 2.9%. That is the honest state of the suite: roughly one quote block in 35 claims content the cited file does not hold. The runtime marker means such a block reaches you labelled, but the label depends on the verifier catching it.
 
 The verifier itself was validated by injecting 49,985 mutations into known-good quotes: 182 escaped (0.364%), and **every** escape fell in one class — all-comment quotes where deleting a word still leaves a contiguous verbatim run, which the `reflowed` verdict is defined to accept. Restricted to quotes containing code, 43,777 mutations were injected and none escaped.
@@ -468,7 +472,7 @@ These were found while building it. They are trades, not bugs to be surprised by
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (345 tests)
+npm test             # vitest (419 tests)
 npm run typecheck:tests
 npm run bench        # real model calls — see Benchmark, not part of npm test
 ```

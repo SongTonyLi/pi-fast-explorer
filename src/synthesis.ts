@@ -2,6 +2,30 @@ import { reanchorReport } from "./citations.js";
 import type { ExplorerResult } from "./explorer.js";
 
 /**
+ * Whether an explorer came back with something worth reading.
+ *
+ * `ok` alone is not enough: an explorer can exit cleanly having produced no
+ * report, and a report of whitespace is a report of nothing.
+ */
+function producedFindings(r: ExplorerResult): boolean {
+	return r.ok && r.report.trim().length > 0;
+}
+
+/**
+ * Whether a whole sweep produced anything at all.
+ *
+ * Exported because `createSweepHandler` has to answer exactly this question
+ * before it decides whether to replace the model's search result, and the two
+ * answers must be the same one. Re-deriving it there — or worse, matching on
+ * the "no findings" sentence `synthesize` writes — would be a second opinion
+ * that can drift from the first, and the cost of drift is destroying a real
+ * grep result on the strength of a string comparison.
+ */
+export function hasFindings(results: readonly ExplorerResult[]): boolean {
+	return results.some(producedFindings);
+}
+
+/**
  * Turns explorer output into the text the main agent reads — and re-anchors it
  * on the way through.
  *
@@ -23,12 +47,17 @@ import type { ExplorerResult } from "./explorer.js";
  * agent knows not to build on, and an unlabelled one is the whole harm.
  * `findUnmarkedFailures` checks that property against this string; the test
  * beside it runs the check on real output of this function.
+ *
+ * The "every explorer failed" branch below is the text for the `explore` tool
+ * path, where a caller asked for exploration and has to be told it produced
+ * nothing. Auto-promotion does NOT deliver it: that path has an original search
+ * result to keep, and `createSweepHandler` checks `hasFindings` and keeps it.
  */
 export function synthesize(results: ExplorerResult[], cwd: string): string {
 	if (results.length === 0) return "No explorers were dispatched.";
 
-	const succeeded = results.filter((r) => r.ok && r.report.trim());
-	const failed = results.filter((r) => !r.ok || !r.report.trim());
+	const succeeded = results.filter(producedFindings);
+	const failed = results.filter((r) => !producedFindings(r));
 
 	const sections: string[] = [];
 

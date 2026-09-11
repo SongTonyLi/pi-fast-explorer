@@ -6,6 +6,11 @@
 This is an audit, not a fix pass. Nothing under `src/`, `prompts/` or `bench/` was changed. Every
 probe was run from `/tmp` against a build of `src/` placed in `/tmp/fx-dist`.
 
+> **Since this audit, three of its findings have been fixed** — [2.1](#21-the-headline-a-stopreason-change-in-pi-turns-every-sweep-into-a-paid-no-op)/[2.2](#22-auto-promotion-replaces-the-tool-result-even-when-every-explorer-failed) (the `stopReason` inversion and the missing fallback),
+> [2.4](#24-the-unmarked-failure-guarantee-is-vacuous-for-three-shapes-the-parser-cannot-see) (the parser's blind spots), and the size-cap half of [2.8](#28-quote-verification-reads-whole-files-with-no-size-cap-and-is-not-confined-to-the-repository).
+> Each section below carries a **Status** line saying what changed. Everything else in this document
+> still describes the code as it stands, and the measurements are all as taken at `af1bb37`.
+
 **How to read the evidence tags.**
 
 | Tag | Meaning |
@@ -302,6 +307,13 @@ underlying provider APIs use — **every explorer in every configuration is repo
 the money already spent. It fails closed, which is right; what makes it the headline is what happens
 next.
 
+**Status: partly fixed.** The comment now states pi's real seven-value vocabulary and cites the
+transitive source by file and line. The allow-list is unchanged — it is still one literal string, and
+a rename would still report every explorer failed — but the *consequence* is contained by the fix to
+[2.2](#22-auto-promotion-replaces-the-tool-result-even-when-every-explorer-failed):
+`tests/autopromote.test.ts` now runs a sweep whose explorers succeed and report
+`stopReason: "end_turn"`, and asserts the original search result survives it.
+
 ### 2.2 Auto-promotion replaces the tool result even when every explorer failed
 
 **Measured. Severity: medium-high. Likelihood: whenever explorers fail — `pi` off PATH, a bad `model`
@@ -336,6 +348,14 @@ promotable search returns nothing useful, at four model calls apiece.
 Mitigating note: pi catches a throwing `tool_result` handler (`dist/core/extensions/runner.js:722-733`)
 and passes the original result through, so *crashes* fail safe. It is the *successful-but-empty*
 return that does not.
+
+**Status: fixed.** `createSweepHandler` now returns `undefined` when no explorer produced findings
+(`hasFindings`, shared with `synthesize` so the two cannot disagree), so pi leaves its own result in
+place untouched — and the spill file is written only once promotion is going ahead, so a failed sweep
+no longer leaves a `0600` file of repository text behind with nobody told its path. The cost of
+returning `undefined` is that a failed sweep's token usage goes unreported; the alternative, rebuilding
+the original result from a hand-copied field list, was rejected as re-introducing the version coupling
+this branch exists to contain.
 
 ### 2.3 `grep` and `find` output formats are undocumented implementation details
 
@@ -404,6 +424,17 @@ model, on one TypeScript corpus, following the contract.
 The honest statement of the property is: *every failure the parser can see is marked*. That is a
 weaker claim than the one in `src/citations.ts:1199-1214`, and the gap is exactly the set of reports
 that need it most.
+
+**Status: fixed.** `~~~` fences are parsed, and the header comment set is now `//`, `#`, `--`, `;`,
+`%`, `<!--` and `/*` (with `-->` and block-comment closers preserved on rewrite) — chosen against a
+re-scan of 3.13M lines, 1.6M of them in the languages the widening admits, which found zero lines
+matching the wide pattern that did not already match the narrow one. `'`, `!` and a bare `*` were
+left out deliberately; see the `HEADER` comment. An unterminated fence is still NOT parsed — reading
+to end-of-report would manufacture a fabrication verdict out of the report's own prose — but it is no
+longer invisible: `reanchorReport` marks its header `UNCHECKED: unterminated code fence` and counts it
+in `ReanchorResult.unparsed`, and `findUnmarkedFailures` reports it as an `"unparsed"` entry rather
+than a clean run. The residual boundary is an unterminated fence with no `path:line` header at all,
+which makes no claim to be a checked excerpt; that is stated in the function's doc comment.
 
 ### 2.5 A report that ignores the contract produces zero citations, zero quotes, and no warning
 
@@ -505,6 +536,21 @@ Separately: a cited path is resolved against `cwd` with no containment check. Pr
 `// ../<other-tmpdir>/secret.txt:1` verified as real and shipped **unmarked**. The explorer already has
 read access, so this is not a new capability; it does mean "verified against disk" is not the same
 claim as "verified against this repository".
+
+**Status: size cap fixed; containment not.** Reads are now capped at `MAX_VERIFY_BYTES` (4 MB, the
+same number `src/detect.ts:44` uses), and a quote citing an over-cap file gets the new `unread`
+verdict — not `missing-file`, which would accuse the model of citing a file that is sitting there, and
+not a pass either. It is marked `UNCHECKED: cited file is too large to verify` and sits outside both
+sides of the fidelity ratio, like `trivial`.
+
+Note that the cap alone does **not** explain the 742 ms row: every file in that fixture was 1 MB,
+under the cap. The cost was the misattribution search re-deriving `anchoredLines` for every candidate
+file for every failing quote — quotes × files, 1,600 derivations for 40 × 40. Anchoring is now cached
+with the read, which is what moves the number: re-measured on the same shape (40 files of ~1.6 MB, all
+quotes fabricated), **1,142 ms / 417 MB before, 257 ms / 173 MB after**. The pass remains bounded by
+(cited files) × 4 MB; no aggregate budget was added.
+
+The containment gap is untouched.
 
 ### 2.9 Verification outcomes depend on filesystem case sensitivity
 
@@ -672,6 +718,13 @@ Two smaller Windows notes, both **Reasoned**:
 > Proposed replacement for "Known limitations", ordered by **how likely you are to hit it**, not by
 > severity. Every item is tagged **Measured** (we have data), **Reasoned** (mechanism understood,
 > not executed) or **Suspected** (plausible, unverified).
+>
+> **Three items below are obsolete as written**, because the defects they describe were fixed after
+> this audit: **4** (auto-promotion replacing your result when exploration failed — it now returns the
+> original untouched), **6** (the verifier's parsing blind spots — `~~~` fences and six comment
+> markers are now read, and an unparseable block is reported rather than passed over), and the first
+> sentence of **18** (reads are now capped at 4 MB, and the adversarial case measures 257 ms rather
+> than 742 ms). Do not copy those three into the README as they stand.
 
 ### Known limitations
 

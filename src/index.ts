@@ -24,7 +24,7 @@ import {
 } from "./explorer.js";
 import { parseFindOutput, parseGrepMatches, parseGrepOutput, summarizeMatches } from "./parse.js";
 import { bucketByDirectory, computeFanout, shouldExplore } from "./partition.js";
-import { synthesize } from "./synthesis.js";
+import { hasFindings, synthesize } from "./synthesis.js";
 
 export interface ExploreInput {
 	question: string;
@@ -501,22 +501,6 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 			if (!claimOutput(text)) return undefined;
 		}
 
-		// randomUUID, not toolCallId: Gemini synthesizes tool call ids as
-		// `${name}_${Date.now()}_${counter}` with a per-response counter, so two
-		// concurrent sessions can collide in a shared tmpdir — and a
-		// provider-controlled string does not belong in a path unsanitized. 0600
-		// because on Linux tmpdir() is a world-traversable /tmp and this file is
-		// verbatim source text.
-		const spillPath = join(tmpdir(), `fx-matches-${randomUUID()}.txt`);
-		let spilled = true;
-		try {
-			writeFileSync(spillPath, text, { encoding: "utf8", mode: 0o600 });
-		} catch {
-			// Best-effort. Exploration proceeds, but we must not then point the model
-			// at a file that is not there: that costs it a wasted turn.
-			spilled = false;
-		}
-
 		const buckets = bucketByDirectory(files, computeFanout(files.length, cfg.maxFanout));
 		const model = cfg.model ?? ctx.model?.id ?? null;
 		const scope = describeScope(searchDir, event.input.glob);
@@ -543,6 +527,57 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		);
 
 		const results = await runWithConcurrency(tasks, cfg.concurrency);
+
+		// Every explorer failed, so there is nothing to promote. Returning here
+		// leaves pi's own result in place byte for byte (`agent-session.js:258` —
+		// a handler that returns undefined is not applied at all), which is the
+		// whole point: without this branch the model's search result was replaced
+		// with "Exploration produced no findings — every explorer failed" plus a
+		// path to a spill file it must spend a turn reading back. Losing the match
+		// list AND getting nothing useful is strictly worse than not promoting.
+		//
+		// It is also the containment for a failure this extension cannot detect on
+		// its own. `runExplorer` treats any stopReason but the literal "stop" as a
+		// failure, against a seven-value vocabulary in an undeclared transitive
+		// dependency (see the note there). If pi ever renames it, every explorer is
+		// reported failed — and without this branch that does not degrade the
+		// feature, it INVERTS it: every promotable search returns a failure notice,
+		// at four model calls apiece, with the original output destroyed. With it,
+		// the same upstream change costs money and changes nothing the model sees.
+		// That holds for any future cause of total failure, not just this one.
+		//
+		// The cost of returning undefined rather than a faithful reconstruction of
+		// the original result is that the explorers' usage goes unreported, and
+		// this package holds that spawning LLM subprocesses must not hide their
+		// cost. The alternative was `{ content: event.content, details:
+		// event.details, usage }`, which pi would accept — but it would rebuild the
+		// tool result from a hand-copied field list, so any field pi adds later is
+		// silently dropped. That is the same shape of version coupling as the bug
+		// this branch exists to contain, and it would be introduced on the one path
+		// whose entire job is to be safe when upstream changed underneath us.
+		if (!hasFindings(results)) return undefined;
+
+		// Spilled only now that the result is actually going to be replaced. Written
+		// before the sweep it would be litter in exactly the case above: a 0600 file
+		// of repository text, in the OS temp directory, whose path nobody was ever
+		// told — spill files are never deleted (README limitation 11), so the only
+		// way not to leave one behind is not to write it.
+		//
+		// randomUUID, not toolCallId: Gemini synthesizes tool call ids as
+		// `${name}_${Date.now()}_${counter}` with a per-response counter, so two
+		// concurrent sessions can collide in a shared tmpdir — and a
+		// provider-controlled string does not belong in a path unsanitized. 0600
+		// because on Linux tmpdir() is a world-traversable /tmp and this file is
+		// verbatim source text.
+		const spillPath = join(tmpdir(), `fx-matches-${randomUUID()}.txt`);
+		let spilled = true;
+		try {
+			writeFileSync(spillPath, text, { encoding: "utf8", mode: 0o600 });
+		} catch {
+			// Best-effort. Promotion proceeds, but we must not then point the model
+			// at a file that is not there: that costs it a wasted turn.
+			spilled = false;
+		}
 
 		const spillNote = spilled
 			? `Raw ${kind === "bash" ? "command" : kind} output (${files.length} files) saved to: ${spillPath}`

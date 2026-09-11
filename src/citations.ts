@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 export interface Citation {
@@ -34,10 +34,61 @@ export function extractCitations(report: string): Citation[] {
 	return out;
 }
 
-const FENCE = /```[^\n]*\n([\s\S]*?)```/g;
-// An excerpt's anchor line, e.g. "// src/auth/session.ts:71". Group 1 is the
-// comment prefix, kept so a rewritten anchor keeps the block's own style.
-const HEADER = /^(\s*(?:\/\/|#)\s*)([^\s:]+):(\d+)\s*$/;
+/**
+ * The opening of a fenced block: a run of three or more backticks or tildes, an
+ * info string, and the newline that ends the line.
+ *
+ * Tildes are here because CommonMark admits them and some models prefer them. A
+ * `~~~` block used to be invisible to this parser — which did not mean its
+ * excerpts went unverified and were flagged, it meant they went unverified and
+ * were NOT flagged, because a quote nobody extracted is a quote nobody can
+ * report on. Two shapes producing `quotes=0, fabricated=0, no marker` is the
+ * failure this whole module exists to make impossible.
+ */
+const FENCE_OPEN = /(`{3,}|~{3,})[^\n]*\n/g;
+/** Closing-run scanners, one per fence character. See `scanFences`. */
+const BACKTICK_RUN = /`{3,}/g;
+const TILDE_RUN = /~{3,}/g;
+
+/**
+ * An excerpt's anchor line, e.g. `// src/auth/session.ts:71`.
+ *
+ * Group 1 is the comment opener together with its spacing, kept so a rewritten
+ * anchor keeps the block's own style. Group 4 is the closing marker of a
+ * two-sided comment (an HTML `-->` or a C block-comment close), kept for the
+ * same reason: an HTML excerpt is headed `<!-- page.html:12 -->`, and rewriting
+ * that to `<!-- page.html:14` would hand the caller a broken comment.
+ *
+ * The opener set is `//`, `#`, `--`, `;`, `%`, `<!--` and `/*`. It was `//` and
+ * `#` alone, which is every language whose line comment this project's own
+ * corpus happens to use and no others: on a SQL, Lua, Haskell, HTML, CSS, Lisp,
+ * assembly, MATLAB or LaTeX repository EVERY block was unparseable, so quote
+ * verification was a no-op that reported 100% fidelity because it had checked
+ * nothing.
+ *
+ * The set is a judgement, and the risk it trades against is splitting a block on
+ * a line of prose that merely looks like a header — which costs a false
+ * `fabricated` on the fragment below the split. Three things bound that risk.
+ * The pattern is anchored at both ends and admits nothing but `path:number`, so
+ * the way source actually cross-references a location (`-- see foo.sql:12 for
+ * why`) does not match. Times do not match either: `-- 10:30:00` leaves `:00`
+ * unconsumed. And it was measured — scanning 3.13M lines (551,564 of the
+ * TypeScript reference corpus, 981,272 of five polyglot repositories and this
+ * package's `node_modules`, and 1,599,778 across 10,349 `.sql`/`.lua`/`.hs`/
+ * `.html`/`.css`/`.el`/`.tex`/`.m`/`.vim`/`.asm`/`.clj`/`.lisp`/`.scm`/`.erl`/
+ * `.ex`/`.pl`/`.ini`/`.xml`/`.svg` files) found **zero** lines matching this
+ * pattern that did not already match the narrow one.
+ *
+ * Three markers were deliberately left out, all of them one character wide and
+ * all of them common as the first character of something that is not a comment:
+ * `'` (VB — also a string opener), `!` (Fortran — also negation, and `#!`), and
+ * a bare `*` (no language's line comment, only a block-comment continuation, and
+ * ` * src/foo.ts:12` is a plausible line INSIDE a real JSDoc block). Their
+ * languages are rare enough in a coding-agent corpus that admitting them buys
+ * less than the splits they could cause. `/*` is in because C, CSS and Java
+ * block comments are not rare, and it is two characters.
+ */
+const HEADER = /^(\s*(?:\/\/+|#+|-{2,}|;+|%+|<!--|\/\*+)\s*)([^\s:]+):(\d+)\s*(-->|\*\/|-{2,})?\s*$/;
 
 /**
  * A marker `reanchorReport` appended, stripped before the header is parsed.
@@ -68,7 +119,63 @@ interface Excerpt {
 	prefix: string;
 	file: string;
 	startLine: number;
+	/** The closing marker of a two-sided comment, or "" — see `HEADER`. */
+	suffix: string;
 	code: string;
+}
+
+/**
+ * One fenced block, with the delimiters it was actually written with.
+ *
+ * `close` is "" for a block whose fence is never closed. That case is kept
+ * rather than dropped because dropping it is precisely how a truncated report
+ * used to ship unverified excerpts with a clean bill of health: the parser saw
+ * no block, so the checker had nothing to object to. Every consumer here has to
+ * decide what to do about `close === ""`, and none of them may decide "nothing".
+ */
+interface FencedBlock {
+	/** Offset of the first character after the opening line. */
+	bodyStart: number;
+	/** The text between the fences; for an unclosed fence, the rest of the report. */
+	body: string;
+	/** The closing delimiter verbatim, or "" when the block is never closed. */
+	close: string;
+	/** Offset just past the closing delimiter, or the end of the report. */
+	end: number;
+}
+
+/**
+ * Every fenced block in a report, in order, closed or not.
+ *
+ * A block is closed by the next run of three-or-more of its OWN fence character,
+ * so a tilde block cannot be closed by backticks. Matching the run rather than
+ * the exact opening string keeps the old regex's tolerance of a four-backtick
+ * fence closed with three (and the reverse), and re-emitting `close` verbatim
+ * means a rewrite puts back exactly what it took out.
+ *
+ * A fence with no closer swallows the rest of the report by definition, so the
+ * scan stops there: anything after it is inside it.
+ */
+function scanFences(report: string): FencedBlock[] {
+	const blocks: FencedBlock[] = [];
+	FENCE_OPEN.lastIndex = 0;
+	let open: RegExpExecArray | null;
+	while ((open = FENCE_OPEN.exec(report)) !== null) {
+		const bodyStart = open.index + open[0].length;
+		const runs = open[1]!.startsWith("`") ? BACKTICK_RUN : TILDE_RUN;
+		runs.lastIndex = bodyStart;
+		const closer = runs.exec(report);
+		const close = closer?.[0] ?? "";
+		blocks.push({
+			bodyStart,
+			body: report.slice(bodyStart, closer?.index ?? report.length),
+			close,
+			end: closer === null ? report.length : closer.index + close.length,
+		});
+		if (closer === null) break;
+		FENCE_OPEN.lastIndex = closer.index + close.length;
+	}
+	return blocks;
 }
 
 /**
@@ -89,8 +196,9 @@ interface Excerpt {
  * ends and admits nothing but `path:number`, so the way code actually
  * cross-references a location — `// see src/foo.ts:12 for why` — does not match.
  * Scanning the 3.4M lines of the reference corpus for lines that do match found
- * zero. Against that, grouping was 5 of 189 blocks in one benchmark run and cost
- * 4 false fabrications.
+ * zero, and re-scanning 3.13M lines including 1.6M of the languages the widened
+ * marker set added found zero more. Against that, grouping was 5 of 189 blocks
+ * in one benchmark run and cost 4 false fabrications.
  *
  * Nor is there a safe heuristic to reach for. Every rule that would suppress a
  * split — same file as the block header, ascending line numbers, must follow a
@@ -112,6 +220,7 @@ function splitExcerpts(bodyLines: readonly string[]): Excerpt[] {
 		prefix: match[1]!,
 		file: match[2]!,
 		startLine: Number(match[3]),
+		suffix: match[4] ?? "",
 		// Up to the next header, or the end of the block for the last excerpt. A
 		// header with only blank lines under it yields an empty quote, which
 		// `verifyQuote` rejects rather than counting as verified.
@@ -122,12 +231,26 @@ function splitExcerpts(bodyLines: readonly string[]): Excerpt[] {
 	}));
 }
 
+/**
+ * Every quote in a report that this module can read.
+ *
+ * An unclosed fence yields nothing, deliberately. Parsing it to the end of the
+ * report is the obvious alternative and it is worse: the body would then run on
+ * through `## Architecture` and every other section the model wrote after the
+ * fence it forgot to close, so the "quote" checked against the file would be
+ * the report's own prose and the verdict would be `fabricated` — a false
+ * accusation, on real code, manufactured by the parser. Truncation is the only
+ * case where reading to the end is right, and nothing in the text distinguishes
+ * a truncated report from a forgotten fence.
+ *
+ * So the block stays unparsed, and `findUnmarkedFailures` reports it as
+ * unparsed instead. Silence was the bug; a false verdict would not be a fix.
+ */
 export function extractQuotes(report: string): Quote[] {
 	const out: Quote[] = [];
-	FENCE.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = FENCE.exec(report)) !== null) {
-		for (const { file, startLine, code } of splitExcerpts(m[1]!.split("\n"))) {
+	for (const block of scanFences(report)) {
+		if (!block.close) continue;
+		for (const { file, startLine, code } of splitExcerpts(block.body.split("\n"))) {
 			out.push({ file, startLine, code });
 		}
 	}
@@ -165,6 +288,18 @@ export function extractQuotes(report: string): Quote[] {
  *                   closing brace, a comment marker, a fragment that occurs all
  *                   over the file. Not a pass and not a failure — see
  *                   `VerifyResult.checkable`
+ *  - unread         the cited file exists and is over MAX_VERIFY_BYTES, so it
+ *                   was never opened. Not a pass and not a failure either: we
+ *                   did not look
+ *
+ * `unread` is its own verdict rather than a reuse of `trivial`, which is the
+ * other verdict meaning "not checked". They are not the same claim. `trivial`
+ * says the verifier read the file and found the quote carried no information;
+ * `unread` says the verifier declined to read the file at all. Folding the
+ * second into the first would print "content too slight to verify either way" on
+ * a block whose content was never examined — a false explanation — and would
+ * add these blocks to `ReanchorResult.trivial` and the benchmark's `trivial`
+ * outcome, corrupting a published number with a different phenomenon.
  */
 export type QuoteVerdict =
 	| "exact"
@@ -176,7 +311,8 @@ export type QuoteVerdict =
 	| "fabricated"
 	| "missing-file"
 	| "empty"
-	| "trivial";
+	| "trivial"
+	| "unread";
 
 /**
  * Verdicts under which every character the caller can read is real content of
@@ -188,8 +324,8 @@ export type QuoteVerdict =
  * does not contain what the report says it contains.
  *
  * `!valid` was once the whole release gate, with nothing to subtract. It is now
- * `!valid && checkable`, because exactly one verdict — `trivial` — is a refusal
- * to judge rather than a judgement. See `VerifyResult.checkable`.
+ * `!valid && checkable`, because two verdicts — `trivial` and `unread` — are a
+ * refusal to judge rather than a judgement. See `VerifyResult.checkable`.
  */
 const CONTENT_IS_REAL: ReadonlySet<QuoteVerdict> = new Set<QuoteVerdict>([
 	"exact",
@@ -213,7 +349,7 @@ export interface VerifyResult extends CitationResult {
 	verdict: QuoteVerdict;
 	/**
 	 * Whether this quote belongs in a fidelity ratio at all — true for every
-	 * verdict but `trivial`.
+	 * verdict but `trivial` and `unread`.
 	 *
 	 * `valid` is a two-valued answer to a question that has three answers. A
 	 * quote of `}` is not verified: the brace is in the file, but so is every
@@ -245,31 +381,88 @@ export interface VerifyResult extends CitationResult {
 	actualFile?: string;
 }
 
-/** Reads a file's lines, or null if it cannot be read. */
-type LineReader = (file: string) => string[] | null;
+/**
+ * Largest file this module will read into memory to verify a quote against.
+ *
+ * Verification runs synchronously inside the host agent's turn, so an unbounded
+ * `readFileSync` is a block on the user's event loop whose length is chosen by
+ * whatever the report cited — a matched 500 MB log, a vendored bundle, a
+ * database dump.
+ *
+ * The number is `src/detect.ts`'s `MAX_VERIFY_FILE_BYTES`, which caps the
+ * analogous read on the auto-promotion path for exactly this reason. The two are
+ * deliberately equal and deliberately NOT shared through an import: `bench/` is
+ * executed directly by `node --experimental-strip-types`, which cannot resolve
+ * the `.js` specifiers `src/` compiles with, so it imports `src/citations.ts` as
+ * a leaf and a value import of `./detect.js` here would break `npm run bench`
+ * with ERR_MODULE_NOT_FOUND. `tests/citations-large-file.test.ts` asserts the
+ * two constants are the same number so the duplication cannot drift.
+ */
+export const MAX_VERIFY_BYTES = 4 * 1024 * 1024;
 
-function readLines(file: string, cwd: string): string[] | null {
+/**
+ * A cited file's lines, or the reason there are none.
+ *
+ * A union rather than `string[] | null` because the two ways of having no lines
+ * demand opposite answers. "Not there" is evidence against the report and is
+ * reported as `missing-file`; "too big to read" is evidence about nothing, and
+ * calling it `missing-file` would accuse a model of citing a file that is
+ * sitting right there. Making the caller destructure a tag is what stops the
+ * second quietly inheriting the first's verdict.
+ */
+type FileLines =
+	| {
+			readonly kind: "read";
+			readonly lines: string[];
+			/** `anchoredLines(lines)`, derived once per file — see `cachedReader`. */
+			readonly anchored: AnchoredLine[];
+	  }
+	| { readonly kind: "missing" }
+	| { readonly kind: "too-large"; readonly bytes: number };
+
+type LineReader = (file: string) => FileLines;
+
+function readLines(file: string, cwd: string): FileLines {
 	try {
-		return readFileSync(resolve(cwd, file), "utf8").split("\n");
+		const path = resolve(cwd, file);
+		const { size } = statSync(path);
+		if (size > MAX_VERIFY_BYTES) return { kind: "too-large", bytes: size };
+		const lines = readFileSync(path, "utf8").split("\n");
+		return { kind: "read", lines, anchored: anchoredLines(lines) };
 	} catch {
-		return null;
+		return { kind: "missing" };
 	}
 }
 
 /**
- * A reader that reads each path at most once.
+ * A reader that reads and anchors each path at most once.
  *
  * `reanchorReport` verifies every excerpt in a report against an overlapping
  * handful of files, and the misattribution search re-reads that same handful.
  * Without a cache the cost of the search would scale with quotes × files
  * instead of files, which is the difference between free and noticeable inside
  * a user's agent turn.
+ *
+ * The anchored form is cached with the lines, and that is the half that carries
+ * the cost. The misattribution search used to call `anchoredLines` on every
+ * candidate file for every failing quote — quotes × files allocations of an
+ * object per non-blank line — so a report citing 40 large files with quotes that
+ * do not verify paid for the same derivation 1,600 times. Deriving it with the
+ * read makes it files, once. Measured on the audit's adversarial shape — 40
+ * cited files of ~1.6 MB, every quote fabricated, so every cheap rule fails and
+ * the misattribution search runs on all of them — **1,142 ms and 417 MB before,
+ * 257 ms and 173 MB after**, on Node 22.22.2 / darwin.
+ *
+ * What remains is the reading and anchoring itself, which is inherent: the pass
+ * is bounded by (cited files) × MAX_VERIFY_BYTES, and the per-file cap is the
+ * only bound on it. That is a deliberate stopping point. An aggregate budget
+ * would have to tell a caller its quote was "unchecked" for a reason that is
+ * about the report's other quotes rather than about its own file, and no
+ * measured case needs it.
  */
 function cachedReader(cwd: string): LineReader {
-	const cache = new Map<string, string[] | null>();
+	const cache = new Map<string, FileLines>();
 	return (file) => {
-		// `null` is a cached miss and must not be re-read; only `undefined` means
-		// this path has never been tried.
 		const cached = cache.get(file);
 		if (cached !== undefined) return cached;
 		const lines = readLines(file, cwd);
@@ -278,9 +471,27 @@ function cachedReader(cwd: string): LineReader {
 	};
 }
 
+/**
+ * Whether a citation's line range exists in the file it names.
+ *
+ * A file over the size cap comes back valid with a reason saying it was not
+ * checked. That is deliberate and it is the lesser of two distortions: a range
+ * is a claim about a file's length, declining to read the file is not evidence
+ * that the claim is wrong, and reporting `false` would fire the citation-validity
+ * number and the benchmark's `problems` list on a file nobody looked at. The
+ * cost is that such an entry counts as valid in a ratio it was never checked for
+ * — real, bounded by how rare a cited 4 MB+ file is, and visible in the reason.
+ */
 export function verifyCitation(c: Citation, cwd: string): CitationResult {
-	const lines = readLines(c.file, cwd);
-	if (!lines) return { valid: false, reason: `file not found: ${c.file}` };
+	const file = readLines(c.file, cwd);
+	if (file.kind === "missing") return { valid: false, reason: `file not found: ${c.file}` };
+	if (file.kind === "too-large") {
+		return {
+			valid: true,
+			reason: `not checked: ${c.file} is ${file.bytes} bytes, over the ${MAX_VERIFY_BYTES}-byte verification cap`,
+		};
+	}
+	const lines = file.lines;
 	if (c.startLine < 1 || c.endLine > lines.length || c.startLine > c.endLine) {
 		return {
 			valid: false,
@@ -729,13 +940,27 @@ function verifyQuoteWith(
 	read: LineReader,
 	searchFiles: readonly string[],
 ): VerifyResult {
-	const lines = read(q.file);
-	if (!lines) {
+	const file = read(q.file);
+	if (file.kind === "missing") {
 		return {
 			valid: false,
 			checkable: true,
 			verdict: "missing-file",
 			reason: `file not found: ${q.file}`,
+		};
+	}
+	// Over the cap the file is never opened, so there is nothing to compare and
+	// nothing to conclude. `checkable: false` keeps it out of both sides of the
+	// fidelity ratio and out of the release gate — a gate that fired because we
+	// declined to read a 40 MB bundle is a gate people learn to override — and
+	// `verdictMarker` still annotates the block, because a caller must never read
+	// "we did not look" as "we looked and it was fine".
+	if (file.kind === "too-large") {
+		return {
+			valid: false,
+			checkable: false,
+			verdict: "unread",
+			reason: `unread: ${q.file} is ${file.bytes} bytes, over the ${MAX_VERIFY_BYTES}-byte verification cap, so this quote was never checked`,
 		};
 	}
 
@@ -750,7 +975,7 @@ function verifyQuoteWith(
 		};
 	}
 
-	const haystack = anchoredLines(lines);
+	const haystack = file.anchored;
 	const found = (verdict: QuoteVerdict, actualLine: number, reason?: string): VerifyResult => ({
 		valid: CONTENT_IS_REAL.has(verdict),
 		checkable: true,
@@ -831,8 +1056,12 @@ function verifyQuoteWith(
 	for (const candidate of searchFiles) {
 		if (candidate === q.file) continue;
 		const other = read(candidate);
-		if (!other) continue;
-		const at = locateQuote(quoted, anchoredLines(other), q.startLine);
+		// A candidate we did not read is not a candidate. Both "absent" and "over
+		// the cap" mean the same thing here: no evidence that this is where the
+		// code lives, so the quote stays fabricated rather than being relocated on
+		// a guess.
+		if (other.kind !== "read") continue;
+		const at = locateQuote(quoted, other.anchored, q.startLine);
 		if (at === null) continue;
 		return {
 			valid: false,
@@ -891,6 +1120,27 @@ export interface ReanchorResult {
 	 * look like a good one.
 	 */
 	trivial: number;
+	/**
+	 * Blocks marked UNCHECKED because the file they cite is over
+	 * MAX_VERIFY_BYTES, so it was never read.
+	 *
+	 * Its own number for the same reason `trivial` is: counted as verified it
+	 * would be a claim nobody checked, counted as fabricated it would be an
+	 * accusation nobody checked, and folded into `trivial` it would be a true
+	 * number under a false name.
+	 */
+	unread: number;
+	/**
+	 * Fenced blocks this pass could not read at all — today, exactly the blocks
+	 * whose fence is never closed.
+	 *
+	 * This is the count that makes the difference between "there was nothing
+	 * wrong" and "we could not see". A report whose last fence is unterminated
+	 * used to produce zeros everywhere — no quotes, no fabrications, no markers —
+	 * and read as a clean run. One number saying "there were N blocks in here I
+	 * did not parse" is what turns that silence back into a finding.
+	 */
+	unparsed: number;
 }
 
 /**
@@ -941,6 +1191,25 @@ const UNCHECKED_TRIVIAL = " — UNCHECKED: content too slight to verify either w
  * anchor we moved it to would be a guess.
  */
 const UNCHECKED_EMPTY = " — UNCHECKED: no code under this header";
+/**
+ * A file too large to read. UNCHECKED, not UNVERIFIED, because nothing about the
+ * block was doubted — the verifier refused to spend the user's turn reading a
+ * multi-megabyte file, and says so rather than letting the block pass as
+ * confirmed.
+ */
+const UNCHECKED_TOO_LARGE = " — UNCHECKED: cited file is too large to verify";
+/**
+ * A block inside a fence that is never closed.
+ *
+ * This is the marker for the shape that has no verdict, because no quote was
+ * ever extracted from it: the parser cannot tell where the block ends, so it
+ * cannot tell what was quoted. What it CAN do is refuse to let the block look
+ * checked. Without this, a truncated report shipped its excerpts bare and
+ * `findUnmarkedFailures` agreed there was nothing to report — a clean run
+ * because nothing was visible, which is the failure mode this package has hit
+ * before and the one that must not recur.
+ */
+const UNCHECKED_UNTERMINATED = " — UNCHECKED: unterminated code fence; this block was not verified";
 
 /**
  * The note for a verdict, or null when the block needs no note.
@@ -974,6 +1243,8 @@ function verdictMarker(result: VerifyResult): string | null {
 			return PARTIAL_REFLOWED;
 		case "trivial":
 			return UNCHECKED_TRIVIAL;
+		case "unread":
+			return UNCHECKED_TOO_LARGE;
 		case "misattributed":
 			return ` — MISATTRIBUTED: this code is in ${result.actualFile}:${result.actualLine}, not here`;
 		case "missing-file":
@@ -1033,7 +1304,8 @@ function reanchorCitations(
 		if (typeof trueStart !== "number" || trueStart === start) continue;
 
 		const delta = trueStart - start;
-		const limit = read(file)?.length ?? end + delta;
+		const target = read(file);
+		const limit = target.kind === "read" ? target.lines.length : end + delta;
 		// The end line is not independently verified. It rides the same delta so
 		// the span keeps its length, clamped so a shift cannot push a citation
 		// that was in bounds past the end of the file.
@@ -1086,14 +1358,31 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 	let misattributed = 0;
 	let partial = 0;
 	let trivial = 0;
+	let unread = 0;
+	let unparsed = 0;
 	let out = "";
 	let cursor = 0;
 
-	FENCE.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = FENCE.exec(report)) !== null) {
-		const body = m[1]!;
-		const bodyLines = body.split("\n");
+	for (const block of scanFences(report)) {
+		const bodyLines = block.body.split("\n");
+
+		// A fence that is never closed. Its excerpts are not verified — see
+		// `extractQuotes` for why reading to the end of the report would be worse
+		// than not reading at all — so the one thing left to do is stop the block
+		// looking verified. Only the header line is touched, and only when there is
+		// one: a block that never claimed a `path:line` is not claiming to be a
+		// checked excerpt, exactly as a headerless closed fence is not.
+		if (!block.close) {
+			unparsed++;
+			const headerLine = bodyLines[0];
+			if (headerLine === undefined || parseHeader(headerLine) === null) continue;
+			const marked =
+				headerLine.replace(VERDICT_MARKER, "").replace(/\s+$/, "") + UNCHECKED_UNTERMINATED;
+			out += report.slice(cursor, block.bodyStart) + marked;
+			cursor = block.bodyStart + headerLine.length;
+			continue;
+		}
+
 		// Not a cited block. Leave it byte-for-byte alone.
 		const excerpts = splitExcerpts(bodyLines);
 		if (excerpts.length === 0) continue;
@@ -1103,7 +1392,7 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 		// it and every other byte of the block survives unchanged.
 		const rewritten = [...bodyLines];
 		let changed = false;
-		for (const { headerIndex, prefix, file, startLine, code } of excerpts) {
+		for (const { headerIndex, prefix, file, startLine, suffix, code } of excerpts) {
 			const result = verifyQuoteWith({ file, startLine, code }, read, searchFiles);
 			const key = `${file}:${startLine}`;
 			// An anchor is only recorded when the content is in the file the header
@@ -1117,14 +1406,20 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 			// so it has no business overruling a real quote that states the same
 			// anchor. Silence is the only honest thing an unchecked block can say
 			// about a citation entry.
+			//
+			// `unread` abstains for the same reason and one more: it is the verdict
+			// for a file we did not open, so it knows nothing about any line of it.
 			const anchored = CONTENT_IS_REAL.has(result.verdict) ? result.actualLine : undefined;
-			const abstains = result.verdict === "empty" || result.verdict === "trivial";
+			const abstains =
+				result.verdict === "empty" || result.verdict === "trivial" || result.verdict === "unread";
 			if (anchored !== undefined) recordAnchor(verified, key, anchored);
 			else if (!abstains) recordAnchor(verified, key, null);
 
 			let header = bodyLines[headerIndex]!.replace(VERDICT_MARKER, "").replace(/\s+$/, "");
 			if (anchored !== undefined && result.drift !== 0) {
-				header = `${prefix}${file}:${anchored}`;
+				// The closing marker of a two-sided comment rides along, so an HTML or
+				// C-style header comes back out as a comment rather than an unclosed one.
+				header = `${prefix}${file}:${anchored}${suffix ? ` ${suffix}` : ""}`;
 				corrected++;
 			}
 			header += verdictMarker(result) ?? "";
@@ -1149,6 +1444,9 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 				case "trivial":
 					trivial++;
 					break;
+				case "unread":
+					unread++;
+					break;
 				case "exact":
 				case "drifted":
 				case "empty":
@@ -1157,12 +1455,12 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 		}
 		if (!changed) continue;
 
-		// m[0] is `opening fence line + body + "```"`, so this recovers the
-		// opening fence with its language tag intact.
-		const openLine = m[0].slice(0, m[0].length - body.length - 3);
-		out += report.slice(cursor, m.index);
-		out += `${openLine}${rewritten.join("\n")}\`\`\``;
-		cursor = m.index + m[0].length;
+		// Everything up to the body is the opening fence with its language tag, and
+		// the closing delimiter goes back exactly as it was found — four backticks
+		// stay four, a tilde fence stays a tilde fence.
+		out += report.slice(cursor, block.bodyStart);
+		out += `${rewritten.join("\n")}${block.close}`;
+		cursor = block.end;
 	}
 	out += report.slice(cursor);
 
@@ -1174,6 +1472,8 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 		misattributed,
 		partial,
 		trivial,
+		unread,
+		unparsed,
 	};
 }
 
@@ -1189,7 +1489,17 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 export interface UnmarkedFailure {
 	file: string;
 	startLine: number;
-	verdict: QuoteVerdict;
+	/**
+	 * The verdict that failed, or `"unparsed"` for a block that produced no
+	 * verdict because it could not be read at all.
+	 *
+	 * `"unparsed"` lives here rather than in `QuoteVerdict` because it is not a
+	 * finding about a quote — no quote was extracted — it is a finding about this
+	 * function's own reach. Putting it in the verdict union would hand it a row in
+	 * the benchmark's outcome table and a case in `verdictMarker`, as though the
+	 * verifier had looked at something and formed a view.
+	 */
+	verdict: QuoteVerdict | "unparsed";
 	/** The fence header exactly as it appears in the delivered report. */
 	header: string;
 	/** Why the quote failed, from `verifyQuote`. */
@@ -1232,8 +1542,27 @@ export interface UnmarkedFailure {
  *    fidelity score — cannot be counted as protection here either.
  *  - The failure set is `!valid && checkable`, the release gate's own predicate,
  *    rather than a hand-written list of verdicts to skip. Today that is exactly
- *    "not valid and not `trivial`". Tomorrow it is whatever the gate means, with
- *    no second opinion kept here to drift out of step with it.
+ *    "not valid, and not `trivial` or `unread`". Tomorrow it is whatever the gate
+ *    means, with no second opinion kept here to drift out of step with it.
+ *
+ * A fourth detail was added after an audit found the first three were being held
+ * over a parser with blind spots. This function re-parses with the SAME parser
+ * `reanchorReport` used, which is what makes it a proof about marking — and
+ * exactly why it could not see a parsing failure: an unterminated fence, a `~~~`
+ * fence and every comment marker but `//` and `#` all produced "no quotes, no
+ * failures, clean run". Three of those four shapes are now parsed. The one that
+ * cannot be — a fence with no closer, where the block's own extent is unknown —
+ * is REPORTED instead, as an `"unparsed"` entry, so the answer to "was anything
+ * invisible?" is a number rather than a silence. A checker that cannot see a
+ * block must say so; saying nothing is indistinguishable from finding nothing,
+ * and that is the bug this project keeps rediscovering.
+ *
+ * The residual boundary, stated rather than left to be found later: an
+ * unterminated fence whose first line is NOT a `path:line` header is not
+ * reported. Such a block makes no claim to be a checked excerpt — it is the same
+ * uncited code block a closed headerless fence is, and those have always been
+ * outside this guarantee — so flagging it would fire on `~~~sh` shell snippets
+ * and train people to ignore the number.
  */
 export function findUnmarkedFailures(report: string, cwd: string): UnmarkedFailure[] {
 	const read = cachedReader(cwd);
@@ -1245,10 +1574,25 @@ export function findUnmarkedFailures(report: string, cwd: string): UnmarkedFailu
 	const searchFiles = citedFiles(report);
 	const out: UnmarkedFailure[] = [];
 
-	FENCE.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = FENCE.exec(report)) !== null) {
-		const bodyLines = m[1]!.split("\n");
+	for (const block of scanFences(report)) {
+		const bodyLines = block.body.split("\n");
+
+		if (!block.close) {
+			const header = bodyLines[0];
+			if (header === undefined) continue;
+			const claim = parseHeader(header);
+			if (claim === null) continue;
+			if (VERDICT_MARKER.test(header)) continue;
+			out.push({
+				file: claim[2]!,
+				startLine: Number(claim[3]),
+				verdict: "unparsed",
+				header,
+				reason: `unparsed: the fence opening this block is never closed, so its excerpt was never extracted or verified`,
+			});
+			continue;
+		}
+
 		for (const { headerIndex, file, startLine, code } of splitExcerpts(bodyLines)) {
 			const result = verifyQuoteWith({ file, startLine, code }, read, searchFiles);
 			if (result.valid || !result.checkable) continue;

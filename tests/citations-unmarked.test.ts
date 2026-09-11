@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	MAX_VERIFY_BYTES,
 	extractQuotes,
 	findUnmarkedFailures,
 	type QuoteVerdict,
@@ -52,6 +53,16 @@ writeFileSync(
 writeFileSync(
 	join(dir, "src", "other.ts"),
 	["type QueuedEvent = {", "  eventName: string", "  async: boolean", "}", ""].join("\n"),
+);
+
+/**
+ * Just over the verification cap, so a quote of its first line — which really is
+ * its first line — comes back `unread` rather than `exact`.
+ */
+const filler = `const padding = "${"x".repeat(200)}"\n`;
+writeFileSync(
+	join(dir, "src", "huge.ts"),
+	`export const findMeInTheHugeFile = 1\n${filler.repeat(Math.ceil(MAX_VERIFY_BYTES / filler.length))}`,
 );
 
 const F = "```";
@@ -168,6 +179,13 @@ const FIXTURES: Record<QuoteVerdict, Fixture> = {
 		report: block("// src/keep.ts:7", "}"),
 		marker: "required",
 	},
+	// Also outside the gate, and the one verdict where the content really is in
+	// the file: the verifier declined to open four megabytes to find out. Marked,
+	// because a block nobody read must not read as a block that checked out.
+	unread: {
+		report: block("// src/huge.ts:1", "export const findMeInTheHugeFile = 1"),
+		marker: "required",
+	},
 };
 
 /**
@@ -188,6 +206,7 @@ const ALL_VERDICTS: readonly QuoteVerdict[] = [
 	"missing-file",
 	"empty",
 	"trivial",
+	"unread",
 ];
 
 /** The first fenced block's header, read back out of the delivered text. */

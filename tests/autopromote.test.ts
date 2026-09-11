@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
@@ -268,5 +268,139 @@ describe("createSweepHandler", () => {
 		process.env[NESTED_ENV_VAR] = "1";
 		expect(await handler(grepResult(sweepOutput), sweepCtx)).toBeUndefined();
 		expect(activeExplorerCount()).toBe(0);
+	});
+});
+
+/**
+ * A stand-in for the `pi` binary the handler spawns.
+ *
+ * The handler resolves `pi` off PATH with `shell: false`, so a stub on PATH is
+ * the only way to exercise the sweep end to end without a model call — and the
+ * only way the negative test below means anything, since a test that can never
+ * produce a promotion would pass with the handler deleted.
+ *
+ * The shebang names this process's own node rather than `env node`, so the stub
+ * still runs when PATH has been narrowed to the stub directory.
+ */
+function piStub(name: string, message: Record<string, unknown>): string {
+	const binDir = join(root, `bin-${name}`);
+	mkdirSync(binDir, { recursive: true });
+	writeFileSync(
+		join(binDir, "pi"),
+		`#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify({ type: "message_end", message }))});\n`,
+		{ mode: 0o755 },
+	);
+	return binDir;
+}
+
+const STUB_REPORT = "## Files Retrieved\n1. `f0.ts` (lines 1-1) - padding\n\n## Architecture\nPadding.";
+
+/** What pi streams for a turn that finished normally. */
+const reportingPi = piStub("ok", {
+	role: "assistant",
+	content: [{ type: "text", text: STUB_REPORT }],
+	usage: { input: 11, output: 7, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+	stopReason: "stop",
+});
+
+/**
+ * The same successful turn, reported under a stopReason this extension does not
+ * allow-list. This is the upstream rename in [2.1] of the audit, reproduced: pi
+ * finishes the work, `runExplorer` calls it a failure, and every explorer in
+ * every configuration is reported failed.
+ */
+const renamedStopReasonPi = piStub("renamed", {
+	role: "assistant",
+	content: [{ type: "text", text: STUB_REPORT }],
+	usage: { input: 11, output: 7, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+	stopReason: "end_turn",
+});
+
+/** Spill files this sweep would have written, by content rather than by name. */
+function spillsHolding(text: string, since: readonly string[]): string[] {
+	return readdirSync(tmpdir())
+		.filter((f) => f.startsWith("fx-matches-") && !since.includes(f))
+		.filter((f) => {
+			try {
+				return readFileSync(join(tmpdir(), f), "utf8") === text;
+			} catch {
+				return false;
+			}
+		});
+}
+
+function spillNames(): string[] {
+	return readdirSync(tmpdir()).filter((f) => f.startsWith("fx-matches-"));
+}
+
+/**
+ * What happens when exploration produces nothing.
+ *
+ * Auto-promotion REPLACES the model's tool result, and it used to do that
+ * unconditionally — so a sweep whose explorers all failed handed the model
+ * "Exploration produced no findings — every explorer failed" in place of a real
+ * grep result, plus the path to a spill file it had to spend a turn reading back
+ * to recover what it already had.
+ *
+ * That is bad on its own and much worse composed with the `stopReason`
+ * allow-list: a pi release that renames `"stop"` does not degrade this
+ * extension, it inverts it. Every promotable search in every session returns a
+ * failure notice, after paying for four model calls, with the original output
+ * destroyed.
+ */
+describe("createSweepHandler when every explorer fails", () => {
+	const handler = createSweepHandler(() => resolveConfig({ timeoutMs: 10_000 }));
+	const originalPath = process.env.PATH;
+
+	afterEach(() => {
+		process.env.PATH = originalPath;
+	});
+
+	it("promotes normally when an explorer does come back with findings", async () => {
+		// The positive control. Everything below asserts that promotion does NOT
+		// happen; this is what proves the fixture can make it happen at all.
+		process.env.PATH = `${reportingPi}${delimiter}${originalPath ?? ""}`;
+		const result = await handler(grepResult(sweepOutput), sweepCtx);
+
+		expect(result).toBeDefined();
+		const text = result?.content?.[0]?.text ?? "";
+		expect(text).toContain("# Explorer:");
+		// Text only this stub writes, so the assertion cannot be satisfied by a real
+		// `pi` that happens to be installed on the machine running the suite.
+		expect(text).toContain("## Architecture\nPadding.");
+		expect(text).toContain("Raw grep output (20 files) saved to:");
+		// The cost of the subprocesses is still reported: a feature that spawns
+		// model calls must not hide them from session totals.
+		expect(result?.usage?.cost?.total).toBeGreaterThan(0);
+		expect(activeExplorerCount()).toBe(0);
+	});
+
+	it("leaves the original result untouched when pi cannot be spawned", async () => {
+		// PATH with nothing on it: `spawn("pi")` fails ENOENT, every explorer comes
+		// back `ok: false`, and there is nothing to promote. Returning undefined is
+		// what leaves pi's own tool result in place — a handler result, even an
+		// identical-looking one, would replace it.
+		const before = spillNames();
+		process.env.PATH = join(root, "bin-empty");
+		mkdirSync(process.env.PATH, { recursive: true });
+
+		expect(await handler(grepResult(sweepOutput), sweepCtx)).toBeUndefined();
+		expect(activeExplorerCount()).toBe(0);
+		// And no spill file was left behind for a promotion that never happened.
+		expect(spillsHolding(sweepOutput, before)).toEqual([]);
+	});
+
+	it("survives a stopReason rename with the search result intact", async () => {
+		// The composed failure, as a regression test. The explorers here SUCCEED —
+		// same report, same usage — and are reported failed only because the
+		// stopReason string changed. Before the fallback this returned a failure
+		// notice in place of the grep output; now the search result survives an
+		// upstream vocabulary change untouched.
+		const before = spillNames();
+		process.env.PATH = `${renamedStopReasonPi}${delimiter}${originalPath ?? ""}`;
+
+		expect(await handler(grepResult(sweepOutput), sweepCtx)).toBeUndefined();
+		expect(activeExplorerCount()).toBe(0);
+		expect(spillsHolding(sweepOutput, before)).toEqual([]);
 	});
 });

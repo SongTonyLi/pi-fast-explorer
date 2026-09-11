@@ -319,9 +319,30 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 				failure ??
 				(code !== 0 || termSignal
 					? `Explorer exited with ${exited}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
-					: // Allow-list: pi's stopReason vocabulary also includes length,
-						// aborted, deferred and pending, every one of which means the
-						// brief was not fully covered.
+					: // Allow-list of one. pi's full stopReason vocabulary is seven
+						// values, and the source is a TRANSITIVE dependency this package
+						// does not declare, so nothing here type-checks against it:
+						//
+						//   node_modules/@earendil-works/pi-coding-agent/node_modules/
+						//     @earendil-works/pi-ai/dist/types.d.ts:287   (pi-ai 0.85.1)
+						//   "pending" | "stop" | "length" | "toolUse" | "error"
+						//     | "aborted" | "deferred"
+						//
+						// Read that line before trusting this list: two other sources
+						// disagree with it and with each other — pi's own
+						// docs/session-format.md:88 omits `pending` and `deferred`, and an
+						// earlier version of this comment omitted `toolUse` and `error`.
+						// The six non-`stop` values all mean the brief was not fully
+						// covered, so failing on them is right.
+						//
+						// What is NOT right is how much rides on the literal string
+						// "stop". A rename upstream — to `end_turn`, the name the provider
+						// APIs use — reports every explorer in every configuration as
+						// failed, with the money already spent. `StreamMessage` is
+						// hand-redeclared here, so TypeScript cannot catch that. The
+						// containment for it is downstream, in `createSweepHandler`: a
+						// sweep where every explorer "failed" returns the original search
+						// result untouched instead of replacing it with a failure notice.
 						acc.stopReason && acc.stopReason !== "stop"
 						? `Explorer stopped with reason "${acc.stopReason}"${
 								acc.errorMessage ? `: ${acc.errorMessage}` : ""
