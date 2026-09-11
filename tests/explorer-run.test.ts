@@ -350,6 +350,27 @@ describe("runExplorer", () => {
 		expect(r.report).toBe("NESTED=1 PATH=inherited");
 	});
 
+	it("reports live tool calls on each activity callback", async () => {
+		const toolStub = stub(
+			"tools.mjs",
+			`console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "grep", arguments: { pattern: "x", path: "src" } }], usage: { input: 1, output: 1, cost: { total: 0.001 } } } }));
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 1, output: 1, cost: { total: 0.001 } }, stopReason: "stop" } }));`,
+		);
+		const seen: string[][] = [];
+		const { extractDisplayItems } = await import("../src/explorer.js");
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [toolStub],
+			brief: "find tools",
+			cfg: resolveConfig(),
+			cwd: dir,
+			onActivity: (acc) => seen.push(extractDisplayItems(acc).map((i) => (i.type === "toolCall" ? i.name : "text"))),
+		});
+		expect(r.ok).toBe(true);
+		expect(seen.some((names) => names.includes("grep"))).toBe(true);
+		expect(seen.at(-1)).toContain("text");
+	});
+
 	it("reports the whole accumulated report on each progress callback", async () => {
 		const seen: string[] = [];
 		const r = await runExplorer({
@@ -370,6 +391,21 @@ describe("runExplorer", () => {
 
 	// onProgress runs inside a 'data' handler, where a throw would become an
 	// uncaught exception and take down the host agent.
+	it("survives an onActivity callback that throws", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [okStub],
+			brief: "find q",
+			cfg: resolveConfig(),
+			cwd: dir,
+			onActivity: () => {
+				throw new Error("consumer blew up");
+			},
+		});
+		expect(r.ok).toBe(true);
+		expect(r.report).toContain("Files Retrieved");
+	});
+
 	it("survives an onProgress callback that throws", async () => {
 		const r = await runExplorer({
 			command: process.execPath,
