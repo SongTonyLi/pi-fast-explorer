@@ -1,0 +1,21 @@
+node_modules/
+dist/
+# The benchmark harness and ALL of its result artifacts are excluded from this
+# repository and from its git history. Every sweep ran against ~/claude-plus-plus,
+# a private third-party repository: the harness named files and symbols from that
+# corpus, and the artifacts quoted its source. Nothing under bench/ is published.
+#
+# An earlier plan was to commit the artifacts with the verbatim report text stripped,
+# so that the numbers in README.md would resolve to files a reader could open. That
+# was reversed — stripping the report text was not enough, because the harness and
+# the artifact metadata still identify the corpus. README.md states the exclusion
+# and its consequence: the published numbers name the run and field they came from,
+# and cannot be independently verified from this repository.
+#
+# This entry stays because untracked working copies may still exist on a developer's
+# machine — including bench/results/raw-reports/, which holds the UNSTRIPPED reports
+# and therefore ~1 MB of the private corpus's source. It is the last defence, not the
+# first. Do not remove it, and do not force anything under it into a commit.
+bench/
+*.log
+.claude-flow/
