@@ -1,6 +1,22 @@
+import { reanchorReport } from "./citations.js";
 import type { ExplorerResult } from "./explorer.js";
 
-export function synthesize(results: ExplorerResult[]): string {
+/**
+ * Turns explorer output into the text the main agent reads — and re-anchors it
+ * on the way through.
+ *
+ * Re-anchoring lives here because this is the one function both entry points
+ * (the explore tool and the auto-promotion hook) must call to produce that text.
+ * Doing it at each call site would work today and rot the first time a third
+ * path is added; doing it here makes an unverified anchor impossible to ship by
+ * omission. That is also why it takes `cwd`: verification needs a root to
+ * resolve cited paths against, and both call sites already hold one.
+ *
+ * Each report is re-anchored on its own rather than after joining. Per-report
+ * keeps one explorer's quotes from re-anchoring another's citation entries, and
+ * keeps the section headers this function adds out of the parsers' way.
+ */
+export function synthesize(results: ExplorerResult[], cwd: string): string {
 	if (results.length === 0) return "No explorers were dispatched.";
 
 	const succeeded = results.filter((r) => r.ok && r.report.trim());
@@ -12,7 +28,8 @@ export function synthesize(results: ExplorerResult[]): string {
 		sections.push("Exploration produced no findings — every explorer failed.");
 	} else {
 		for (const r of succeeded) {
-			sections.push(`# Explorer: ${r.brief}\n\n${r.report.trim()}`);
+			const { report } = reanchorReport(r.report.trim(), cwd);
+			sections.push(`# Explorer: ${r.brief}\n\n${report}`);
 		}
 	}
 

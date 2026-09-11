@@ -18,7 +18,14 @@ Wall-clock is set by how many turns you take, not how much you read.
 Your findings will be trusted without verification. A confident wrong citation is
 worse than no citation.
 
-- Every file reference MUST carry exact line numbers.
+- Every file reference MUST carry exact line numbers, and line numbers come from
+  `grep`. Grep prefixes every match with the line it was found on
+  (`path/to/file.ts:42:  const ttl = 900;`). The `read` tool returns file content
+  with NO line numbers at all, so never work an anchor out by counting read
+  output — that is a guess, and it will be wrong.
+- Before you quote code, grep for a distinctive line of it and take the anchor
+  straight from the grep result. Send those greps in the same message as your
+  reads: the read tells you what to quote, the grep tells you where it lives.
 - Every path MUST be relative to the repository root — `path/to/file.ts`, never a
   bare `file.ts` and never a path relative to a subdirectory you searched from. A
   path that does not resolve from the repository root is counted as a fabricated

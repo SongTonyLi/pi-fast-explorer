@@ -34,6 +34,11 @@ export interface ExploreInput {
 /** Structured payload attached to every tool result, partial and final alike. */
 export interface ExploreDetails {
 	briefs: string[];
+	/**
+	 * Each explorer's report exactly as it came back, before `synthesize`
+	 * re-anchors citations against disk. This is the record of what was said;
+	 * the text content is the corrected version the main agent reasons from.
+	 */
 	results: ExplorerResult[];
 }
 
@@ -356,7 +361,9 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 			: `${files.length} files matched. Raw output could not be saved to disk.`;
 
 		return {
-			content: [{ type: "text" as const, text: `${synthesize(results)}\n\n---\n\n${spillNote}` }],
+			content: [
+				{ type: "text" as const, text: `${synthesize(results, ctx.cwd)}\n\n---\n\n${spillNote}` },
+			],
 			// This REPLACES the tool's usage rather than adding to it
 			// (core/agent-session.js: `usage: hookResult?.usage`). Safe only because
 			// grep and find report no usage of their own. Reporting it is not
@@ -455,7 +462,7 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 
 			const details: ExploreDetails = { briefs, results };
 			return {
-				content: [{ type: "text" as const, text: synthesize(results) }],
+				content: [{ type: "text" as const, text: synthesize(results, ctx.cwd) }],
 				details,
 				usage,
 			};
