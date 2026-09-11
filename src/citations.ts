@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 export interface Citation {
 	file: string;
 	startLine: number;
@@ -40,4 +43,55 @@ export function extractQuotes(report: string): Quote[] {
 		out.push({ file: header[1]!, startLine: Number(header[2]), code });
 	}
 	return out;
+}
+
+export interface VerifyResult {
+	valid: boolean;
+	reason?: string;
+}
+
+function readLines(file: string, cwd: string): string[] | null {
+	try {
+		return readFileSync(resolve(cwd, file), "utf8").split("\n");
+	} catch {
+		return null;
+	}
+}
+
+export function verifyCitation(c: Citation, cwd: string): VerifyResult {
+	const lines = readLines(c.file, cwd);
+	if (!lines) return { valid: false, reason: `file not found: ${c.file}` };
+	if (c.startLine < 1 || c.endLine > lines.length || c.startLine > c.endLine) {
+		return {
+			valid: false,
+			reason: `lines ${c.startLine}-${c.endLine} out of bounds for ${c.file} (${lines.length} lines)`,
+		};
+	}
+	return { valid: true };
+}
+
+/** Normalizes indentation so reflowed quotes are not counted as hallucinations. */
+function normalize(text: string): string {
+	return text
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0)
+		.join("\n");
+}
+
+export function verifyQuote(q: Quote, cwd: string): VerifyResult {
+	const lines = readLines(q.file, cwd);
+	if (!lines) return { valid: false, reason: `file not found: ${q.file}` };
+
+	const quoted = normalize(q.code);
+	if (!quoted) return { valid: true };
+
+	const span = quoted.split("\n").length;
+	const start = q.startLine - 1;
+	const actual = normalize(lines.slice(start, start + span).join("\n"));
+
+	if (actual !== quoted) {
+		return { valid: false, reason: `quote does not match ${q.file}:${q.startLine}` };
+	}
+	return { valid: true };
 }
