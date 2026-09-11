@@ -109,7 +109,8 @@ fall back to a planner call producing `[{ brief, globs }]`.
 Fan-out is determined per path:
 
 - **Path A** — one explorer per sub-question, bounded by `maxFanout`. An explicit
-  `fanout` argument overrides that bound.
+  `fanout` argument can lower that number for a single call, but is clamped into
+  `[1, maxFanout]` and so can never widen past the configured ceiling.
 - **Path B** — `clamp(ceil(files / 8), 2, maxFanout)`, since the file count is known
   before any model call.
 
@@ -202,18 +203,20 @@ it is an additive change that does not affect the v1 architecture.
 
 ### Configuration
 
+Keys live at the top level of the config file. There is no `fastExplorer` wrapper
+key: the loader rejects unknown top-level keys, so a wrapped file would be discarded
+in its entirety.
+
 ```json
 {
-  "fastExplorer": {
-    "model": null,
-    "thinking": "off",
-    "maxFanout": 4,
-    "concurrency": 4,
-    "maxTurnsPerExplorer": 5,
-    "minTotalBytes": 51200,
-    "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
-    "timeoutMs": 120000
-  }
+  "model": null,
+  "thinking": "off",
+  "maxFanout": 4,
+  "concurrency": 4,
+  "maxTurnsPerExplorer": 5,
+  "minTotalBytes": 51200,
+  "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
+  "timeoutMs": 120000
 }
 ```
 
@@ -518,3 +521,20 @@ three. The flag is load-bearing, not tidiness.
 never consulted, so there is a second layer: every explorer is spawned with
 `PI_FAST_EXPLORER_NESTED=1` in its environment (inherited by the whole subtree) and
 the auto-promotion hook returns early whenever it sees that variable.
+
+**No planner shipped in v1.** "Partitioning" above describes a planner call as the
+Path A fallback when the caller supplies no `questions`. It was not built. A
+`question`-only `explore` call runs exactly one explorer, so the explicit tool path
+fans out only as wide as the caller decomposed. Path B is unaffected: it partitions
+a file list it already has. The README states this at the call site, because it
+determines how the tool should be invoked.
+
+**Install requires a `pi.extensions` manifest.** The symlink install under
+"Publishing" works only because `package.json` declares
+`"pi": { "extensions": ["dist/index.js"] }`: pi discovers a subdirectory of
+`~/.pi/agent/extensions/` only when it holds a top-level `index.ts`/`index.js` or
+declares that field. The symlink must also target the package root rather than
+`dist/`, because pi does not consistently dereference a symlink before resolving
+`prompts/explorer.md` relative to the loaded file, and a missing
+`--append-system-prompt` path is appended as literal text rather than raising —
+which would strip the output contract from every explorer with no error anywhere.

@@ -25,23 +25,21 @@ Two entry paths:
 
 ```bash
 npm install -g pi-fast-explorer
+mkdir -p ~/.pi/agent/extensions
+ln -s "$(npm root -g)/pi-fast-explorer" ~/.pi/agent/extensions/fast-explorer
 ```
 
-Then register it with pi. Add the installed entry point to `~/.pi/agent/settings.json`:
+That is the convention pi's own examples use: extensions are auto-discovered from `~/.pi/agent/extensions/` ("Extension Locations" in pi's `docs/extensions.md`), and a subdirectory there is loaded when it declares `pi.extensions` in its `package.json`, which this package does.
 
-```json
-{
-  "extensions": ["/opt/homebrew/lib/node_modules/pi-fast-explorer/dist/index.js"]
-}
-```
+**Symlink the package root, not `dist/`.** The extension reads its explorer prompt from `../prompts/explorer.md`, relative to the file pi loaded it as — and pi does not consistently dereference a symlink before resolving that (both behaviours were observed on pi 0.85.1, depending on where the target lives). A package-root symlink is correct either way, because `prompts/` sits next to `dist/` on both sides of the link. A symlink to `dist/` is not: it resolves to `~/.pi/agent/extensions/prompts/explorer.md`, which does not exist, and pi appends a missing prompt path to the system prompt as literal text rather than failing — so every explorer would run without its output contract and return unparseable reports, with nothing in the logs to say why.
 
-Replace the prefix with your own global root (`npm root -g`). To try it for a single session without editing settings:
+To try it for a single session without installing anything globally, point `-e` at a checkout you have built:
 
 ```bash
-pi -e "$(npm root -g)/pi-fast-explorer/dist/index.js"
+pi -e /path/to/fast-explorer
 ```
 
-**On the symlink convention.** pi also auto-discovers extensions from `~/.pi/agent/extensions/` — `*.ts`, `*.js`, or a subdirectory containing `index.ts`/`index.js` (see "Extension Locations" in pi's `docs/extensions.md`). That is the layout pi's own examples use, but it does not work for this package as published, and the failure is quiet rather than loud. A directory entry is discovered only if it contains `index.ts`/`index.js` at its top level or declares `pi.extensions` in its `package.json`; this package has neither, so symlinking the package root discovers nothing. Symlinking `dist/` instead *is* discovered — but pi loads the entry through the symlink path rather than its real path, so the extension resolves its explorer prompt to `~/.pi/agent/extensions/prompts/explorer.md`, which does not exist, and every explorer then runs without its output contract. Verified against pi 0.85.1. Use the settings entry above.
+To remove it: `rm ~/.pi/agent/extensions/fast-explorer`.
 
 ## The `explore` tool
 
@@ -54,7 +52,28 @@ explore({
 })
 ```
 
-**Supply `questions` when you can.** It is the difference between one explorer and several. With `questions`, each entry becomes one explorer's brief and they run concurrently; without it, `question` becomes a single brief and exactly one explorer runs. There is no planner subagent that decomposes for you — that was in the original design and is not in the code — so a `question`-only call buys context isolation but no parallelism. Supplying `questions` also removes a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call.
+### `questions` is what makes exploration parallel
+
+This is the single thing to get right at the call site. Each entry in `questions` becomes one explorer's brief, and those explorers run concurrently. **Omit `questions` and you get exactly one explorer**, working on `question` alone — there is no planner subagent that decomposes the question for you. The original design had one; it is not in the code, and nothing substitutes for it.
+
+A `question`-only call is not useless: the file contents still stay out of the main agent's context, which is most of the durable benefit. But it is one subprocess reading sequentially, so it is not faster than the main agent doing the same work itself, and the fan-out that makes the exploration turn quick does not happen.
+
+```ts
+// one explorer, sequential
+explore({ question: "How does session auth work?" })
+
+// three explorers, concurrent
+explore({
+  question: "How does session auth work?",
+  questions: [
+    "Where are session tokens minted and what is in them?",
+    "How and where are tokens validated on each request?",
+    "What is the refresh and expiry path?",
+  ],
+})
+```
+
+Supplying `questions` also removes a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call. The tool's `promptGuidelines` tell the model to supply 2-4 sub-questions whenever it can decompose the task, but a model can always ignore guidance — if you are calling `explore` yourself, decompose.
 
 `questions` is truncated to `maxFanout` entries. `fanout` is clamped into `[1, maxFanout]`, so it can only narrow a call, never widen it past the configured ceiling.
 
@@ -198,6 +217,8 @@ These were found while building it. They are trades, not bugs to be surprised by
 11. **Explorers do not know what they do not know.** The main agent holds the whole conversation; an explorer gets one brief. It will miss adjacent-but-relevant code. Related: every explorer re-reads the shared `types.ts`, which wastes tokens and can produce inconsistent descriptions of the same entity across reports.
 
 12. **Non-determinism.** Parallel LLM calls give different answers across runs. This makes behaviour harder to test and harder to trust than a mechanical index would be.
+
+13. **`explore` without `questions` is not parallel.** There is no planner subagent, so a call that supplies only `question` runs exactly one explorer. The auto-promotion path always fans out, because it partitions a known file list; the explicit tool path fans out only as wide as the caller decomposed. See "`questions` is what makes exploration parallel" above.
 
 ## Development
 
