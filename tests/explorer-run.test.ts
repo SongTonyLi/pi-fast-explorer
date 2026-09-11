@@ -391,6 +391,21 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 
 	// onProgress runs inside a 'data' handler, where a throw would become an
 	// uncaught exception and take down the host agent.
+	it("survives an onActivity callback that throws", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [okStub],
+			brief: "find q",
+			cfg: resolveConfig(),
+			cwd: dir,
+			onActivity: () => {
+				throw new Error("consumer blew up");
+			},
+		});
+		expect(r.ok).toBe(true);
+		expect(r.report).toContain("Files Retrieved");
+	});
+
 	it("survives an onProgress callback that throws", async () => {
 		const r = await runExplorer({
 			command: process.execPath,

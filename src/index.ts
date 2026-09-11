@@ -15,8 +15,9 @@ import {
 import { Type } from "typebox";
 import {
 	type ExplorerSnapshot,
-	getExplorer,
 	nextExplorerId,
+	resetExplorers,
+	shouldResetExplorers,
 	upsertExplorer,
 } from "./activity.js";
 import { type FastExplorerConfig, type PartialConfig, loadConfigFrom, resolveConfig } from "./config.js";
@@ -541,7 +542,8 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		const tasks = buckets.map((bucket) => () => {
 			const brief = `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`;
 			const id = nextExplorerId();
-			upsertExplorer({ id, brief, status: "running", items: [], report: "" });
+			let items: ExplorerSnapshot["items"] = [];
+			upsertExplorer({ id, brief, status: "running", items, report: "" });
 			refreshExplorerWidget();
 			return withExplorerSlot(cfg.concurrency, async () => {
 				const result = await runExplorer({
@@ -557,7 +559,9 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 					cwd: ctx.cwd,
 					signal: ctx.signal,
 					onActivity: (acc) => {
-						upsertExplorer(snapshotFromAcc(id, brief, acc));
+						const snap = snapshotFromAcc(id, brief, acc);
+						items = snap.items;
+						upsertExplorer(snap);
 						refreshExplorerWidget();
 					},
 				});
@@ -565,7 +569,7 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 					id,
 					brief,
 					status: result.ok ? "ok" : "failed",
-					items: getExplorer(id)?.items ?? [],
+					items,
 					report: result.report,
 					error: result.error,
 				});
@@ -653,7 +657,7 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 
 	// pi's loader calls the factory with only `pi`, so `userConfig` is populated
 	// exclusively by a wrapper extension. Disk is the path real users have.
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		const { config, error } = loadConfigFrom(
 			join(getAgentDir(), CONFIG_FILE_NAME),
 			join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME),
@@ -662,7 +666,9 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			cfg,
 		);
 		cfg = config;
+		if (shouldResetExplorers(event.reason)) resetExplorers();
 		bindExplorerUi(ctx.hasUI ? ctx.ui : undefined);
+		refreshExplorerWidget();
 		if (error) {
 			ctx.ui.notify(`fast-explorer: ignoring invalid config — ${error}`, "warning");
 		}
@@ -722,13 +728,19 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			// Partial updates carry `details` too — AgentToolResult requires it on
 			// every emission, not just the final one.
 			const finished: ExplorerResult[] = [];
-			const report = () =>
-				onUpdate?.({
-					content: [
-						{ type: "text", text: `${finished.length}/${briefs.length} explorers done` },
-					],
-					details: { briefs, results: [...finished], live: live.map((s) => ({ ...s })) },
-				});
+			const report = () => {
+				try {
+					onUpdate?.({
+						content: [
+							{ type: "text", text: `${finished.length}/${briefs.length} explorers done` },
+						],
+						details: { briefs, results: [...finished], live: live.map((s) => ({ ...s })) },
+					});
+				} catch {
+					// Same isolation as onActivity: a throwing renderer must not
+					// fail the explore Promise.all after the money is spent.
+				}
+			};
 			report();
 
 			const tasks = briefs.map((brief, index) => async () => {

@@ -197,7 +197,7 @@ One finding is worth surfacing even without its numbers. Five consecutive sweeps
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (430 tests)
+npm test             # vitest (440 tests)
 npm run typecheck:tests
 ```
 

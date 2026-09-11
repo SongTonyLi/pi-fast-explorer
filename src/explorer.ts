@@ -68,6 +68,7 @@ export interface StreamContentPart {
 	type?: string;
 	text?: string;
 	name?: string;
+	id?: string;
 	arguments?: Record<string, unknown>;
 	args?: Record<string, unknown>;
 }
@@ -141,29 +142,40 @@ function itemsFromMessages(messages: StreamMessage[]): DisplayItem[] {
 	return items;
 }
 
-function lastAssistantHasToolCalls(messages: StreamMessage[]): boolean {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i]!;
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		return msg.content.some((part) => part.type === "toolCall" && part.name);
-	}
-	return false;
+function toolFingerprint(name: string, args: Record<string, unknown>): string {
+	return `${name}\0${JSON.stringify(args)}`;
 }
 
 /**
  * Tool calls and text the explorer has produced so far, in stream order.
  *
- * `tool_execution_start` can land before the assistant `message_end` that
- * records the same calls. Those pending executions are appended only when the
- * latest assistant message does not already list them, so the inspector does
- * not show each grep twice.
+ * `tool_execution_start` can land before or after the assistant `message_end`
+ * that records the same calls, and a later turn's starts can land while the
+ * last assistant message still lists the previous turn's tools. Each execution
+ * is keyed by id and by name+args so the same grep is not shown twice, and
+ * finishing a tool does not remove it — an empty inspector is worse than a
+ * briefly-stale one.
  */
 export function extractDisplayItems(acc: Accumulator): DisplayItem[] {
 	const items = itemsFromMessages(acc.messages);
-	if (!lastAssistantHasToolCalls(acc.messages)) {
-		for (const tool of acc.pendingTools) {
-			items.push({ type: "toolCall", name: tool.name, args: tool.args });
+	const seen = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const item of items) {
+		if (item.type === "toolCall") seen.add(toolFingerprint(item.name, item.args));
+	}
+	for (const msg of acc.messages) {
+		if (!Array.isArray(msg.content)) continue;
+		for (const part of msg.content) {
+			if (part.type === "toolCall" && typeof part.id === "string") seenIds.add(part.id);
 		}
+	}
+	for (const tool of acc.pendingTools) {
+		if (seenIds.has(tool.id)) continue;
+		const fp = toolFingerprint(tool.name, tool.args);
+		if (seen.has(fp)) continue;
+		items.push({ type: "toolCall", name: tool.name, args: tool.args });
+		seen.add(fp);
+		seenIds.add(tool.id);
 	}
 	return items;
 }
@@ -188,8 +200,9 @@ export function processLine(line: string, acc: Accumulator): void {
 		return;
 	}
 
-	if (event.type === "tool_execution_end" && event.toolCallId) {
-		acc.pendingTools = acc.pendingTools.filter((tool) => tool.id !== event.toolCallId);
+	if (event.type === "tool_execution_end") {
+		// Keep the call. Hiding it here blanks the inspector between preflight
+		// execution and the assistant message_end that restates the same tools.
 		return;
 	}
 

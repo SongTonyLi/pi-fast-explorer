@@ -49,6 +49,8 @@ describe("processLine", () => {
 		expect(acc.usage.turns).toBe(0);
 		expect(acc.pendingTools).toEqual([{ id: "t1", name: "grep", args: { pattern: "x" } }]);
 		expect(extractDisplayItems(acc)).toEqual([{ type: "toolCall", name: "grep", args: { pattern: "x" } }]);
+		processLine(JSON.stringify({ type: "tool_execution_end", toolCallId: "t1", toolName: "grep" }), acc);
+		expect(extractDisplayItems(acc)).toEqual([{ type: "toolCall", name: "grep", args: { pattern: "x" } }]);
 	});
 
 	it("records stopReason and errorMessage", () => {

@@ -16,6 +16,7 @@ const MAX_RETAINED = 16;
 
 const explorers = new Map<string, ExplorerSnapshot>();
 const order: string[] = [];
+const listeners = new Set<() => void>();
 let nextId = 0;
 
 export function nextExplorerId(): string {
@@ -28,12 +29,36 @@ export function resetExplorers(): void {
 	explorers.clear();
 	order.length = 0;
 	nextId = 0;
+	notifyListeners();
+}
+
+/** `/reload` must not wipe in-flight explorers; every other session start does. */
+export function shouldResetExplorers(reason: string): boolean {
+	return reason !== "reload";
+}
+
+export function onExplorerChange(fn: () => void): () => void {
+	listeners.add(fn);
+	return () => {
+		listeners.delete(fn);
+	};
+}
+
+function notifyListeners(): void {
+	for (const fn of listeners) {
+		try {
+			fn();
+		} catch {
+			// A throwing inspector must not take down the host session.
+		}
+	}
 }
 
 export function upsertExplorer(snapshot: ExplorerSnapshot): ExplorerSnapshot {
 	if (!explorers.has(snapshot.id)) order.push(snapshot.id);
 	explorers.set(snapshot.id, snapshot);
 	trimRetained();
+	notifyListeners();
 	return snapshot;
 }
 
@@ -47,7 +72,10 @@ export function getExplorer(id: string): ExplorerSnapshot | undefined {
 
 function trimRetained(): void {
 	while (order.length > MAX_RETAINED) {
-		const drop = order.find((id) => explorers.get(id)?.status !== "running") ?? order[0];
+		// Never evict a running explorer. A model can fire many greps in one
+		// turn; each may mark several children running before the slot pool
+		// drains. Overshoot the cap until they settle.
+		const drop = order.find((id) => explorers.get(id)?.status !== "running");
 		if (!drop) return;
 		const idx = order.indexOf(drop);
 		if (idx >= 0) order.splice(idx, 1);

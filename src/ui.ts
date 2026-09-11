@@ -1,12 +1,14 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
 	type ExplorerSnapshot,
 	formatExplorerChoices,
 	formatExplorerTranscript,
 	formatToolCall,
 	formatWidgetLines,
+	getExplorer,
 	lastActivity,
 	listExplorers,
+	onExplorerChange,
 	oneLineBrief,
 	statusGlyph,
 } from "./activity.js";
@@ -45,7 +47,7 @@ interface TextComponent {
 
 function textComponent(text: string): TextComponent {
 	return {
-		render: () => text.split("\n"),
+		render: (width: number) => wrapLines(text.split("\n"), width),
 		invalidate: () => {},
 	};
 }
@@ -101,14 +103,16 @@ function renderSnapshot(snapshot: ExplorerSnapshot, theme: RenderTheme, expanded
 		statusGlyph(snapshot.status),
 	);
 	const header = `${icon} ${fg(theme, "accent", oneLineBrief(snapshot.brief, expanded ? 80 : 48))}`;
+	const lines = [header];
+	if (snapshot.error) lines.push(`  ${fg(theme, "error", snapshot.error)}`);
 	if (snapshot.items.length === 0) {
 		const empty = snapshot.status === "running" ? "starting…" : "no activity";
-		return `${header}\n  ${fg(theme, "muted", empty)}`;
+		lines.push(`  ${fg(theme, "muted", empty)}`);
+		return lines.join("\n");
 	}
 
 	const shown = expanded ? snapshot.items : snapshot.items.slice(-6);
 	const skipped = snapshot.items.length - shown.length;
-	const lines = [header];
 	if (skipped > 0) lines.push(`  ${fg(theme, "muted", `… ${skipped} earlier items`)}`);
 	for (const item of shown) {
 		if (item.type === "toolCall") {
@@ -161,42 +165,50 @@ export function renderExploreResult(
 
 interface SelectUi {
 	hasUI: boolean;
-	ui: {
-		select(title: string, options: string[]): Promise<string | undefined | null>;
-		notify(message: string, type?: "info" | "warning" | "error"): void;
-		custom<T>(
-			factory: (
-				tui: unknown,
-				theme: unknown,
-				keybindings: unknown,
-				done: (result: T) => void,
-			) => TextComponent,
-			options?: { overlay?: boolean },
-		): Promise<T>;
-	};
+	mode?: string;
+	ui: Pick<ExtensionUIContext, "select" | "notify" | "custom">;
+}
+
+/** Escape, CSI-u escape/enter, q, enter, and Ctrl+C all close the inspector. */
+export function isInspectorCloseKey(data: string): boolean {
+	if (data === "\x1b" || data === "q" || data === "Q" || data === "\r" || data === "\n" || data === "\x03") {
+		return true;
+	}
+	return data === "\x1b[27u" || data === "\x1b[27;1u" || data === "\x1b[13u" || data === "\x1b[13;1u";
+}
+
+export function liveTranscript(id: string, fallback: ExplorerSnapshot): string[] {
+	return formatExplorerTranscript(getExplorer(id) ?? fallback);
 }
 
 async function showInspector(ctx: SelectUi, snapshot: ExplorerSnapshot): Promise<void> {
-	const lines = formatExplorerTranscript(snapshot);
+	const notifyFallback = () => {
+		ctx.ui.notify(liveTranscript(snapshot.id, snapshot).slice(0, 12).join(" · "), "info");
+	};
+	// RPC hasUI is true but custom() is a no-op that returns undefined.
+	if (ctx.mode && ctx.mode !== "tui") {
+		notifyFallback();
+		return;
+	}
 	try {
-		await ctx.ui.custom((_tui, _theme, _kb, done) => {
+		await ctx.ui.custom((tui, _theme, _kb, done) => {
+			const unsubscribe = onExplorerChange(() => tui.requestRender());
 			return {
 				render: (width: number) => {
-					const body = wrapLines(lines, width);
+					const body = wrapLines(liveTranscript(snapshot.id, snapshot), width);
 					body.push("");
 					body.push("esc / q to close");
 					return body;
 				},
 				invalidate: () => {},
+				dispose: unsubscribe,
 				handleInput: (data: string) => {
-					if (data === "\x1b" || data === "q" || data === "Q" || data === "\r" || data === "\n") {
-						done(undefined as never);
-					}
+					if (isInspectorCloseKey(data)) done(undefined as never);
 				},
 			};
 		}, { overlay: true });
 	} catch {
-		ctx.ui.notify(lines.slice(0, 8).join(" · "), "info");
+		notifyFallback();
 	}
 }
 
