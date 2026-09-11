@@ -209,3 +209,189 @@ describe("reanchorReport on blocks holding several excerpts", () => {
 		expect(out.fabricated).toBe(0);
 	});
 });
+
+/**
+ * One marker per verdict, because the caller's correct response differs.
+ * PARTIAL means read the block and then go read the rest of the line;
+ * UNVERIFIED means do not believe the block; MISATTRIBUTED means believe the
+ * code and disbelieve the path. Stamping all of them UNVERIFIED told a caller to
+ * discard twelve good excerpts to catch two bad ones — on the reference corpus,
+ * literally twelve and two — which is how a warning teaches people to ignore it.
+ */
+describe("reanchorReport marks blocks by verdict", () => {
+	const dir2 = mkdtempSync(join(tmpdir(), "fx-verdict-mark-"));
+	mkdirSync(join(dir2, "src"));
+	writeFileSync(
+		join(dir2, "src", "budget.ts"),
+		[
+			"// Enforce the per-message budget. Runs BEFORE microcompact, so the",
+			"// two compose cleanly. No-ops when the feature is switched off.",
+			"export type Entry = {",
+			"  kind: 'entry'",
+			"  owner: string",
+			"  tags: string[]",
+			"}",
+			"",
+		].join("\n"),
+	);
+	// Holds verbatim what the report is about to attribute to `budget.ts`.
+	writeFileSync(
+		join(dir2, "src", "events.ts"),
+		["type QueuedEvent = {", "  eventName: string", "  async: boolean", "}", ""].join("\n"),
+	);
+
+	const report = [
+		"## Files Retrieved",
+		"1. `src/budget.ts` (lines 1-7) - the budget",
+		"2. `src/events.ts` (lines 1-4) - the queue",
+		"",
+		`${F}typescript`,
+		"// src/budget.ts:1",
+		"// Enforce the per-message budget. Runs BEFORE microcompact, so the",
+		"// two compose cleanly.",
+		F,
+		"",
+		`${F}typescript`,
+		"// src/budget.ts:3",
+		"export type Entry = {",
+		"  kind: 'entry'",
+		"  tags: string[]",
+		"}",
+		F,
+		"",
+		`${F}typescript`,
+		"// src/budget.ts:1",
+		"// Enforce the per-message budget. Runs",
+		"// BEFORE microcompact, so the two compose cleanly.",
+		F,
+		"",
+		`${F}typescript`,
+		"// src/budget.ts:30",
+		"type QueuedEvent = {",
+		"  eventName: string",
+		"  async: boolean",
+		"}",
+		F,
+		"",
+		`${F}typescript`,
+		"// src/budget.ts:40",
+		"export const neverWritten = true;",
+		F,
+		"",
+	].join("\n");
+	const result = reanchorReport(report, dir2);
+
+	it("marks a clipped quote as partial, not unverified", () => {
+		expect(result.report).toContain(
+			"// src/budget.ts:1 — PARTIAL: lines clipped; the text shown is verbatim",
+		);
+	});
+
+	it("marks an elided quote as partial and says lines were omitted", () => {
+		expect(result.report).toContain(
+			"// src/budget.ts:3 — PARTIAL: lines omitted; the text shown is verbatim",
+		);
+	});
+
+	it("marks a re-wrapped comment as partial and says the wording is verbatim", () => {
+		expect(result.report).toContain(
+			"// src/budget.ts:1 — PARTIAL: comment re-wrapped; the wording is verbatim",
+		);
+	});
+
+	it("names the real file on a misattributed block", () => {
+		// The one verdict where the caller cannot recover the useful fact from the
+		// block itself: the code is real, so nothing about it looks wrong.
+		expect(result.report).toContain(
+			"// src/budget.ts:30 — MISATTRIBUTED: this code is in src/events.ts:1, not here",
+		);
+	});
+
+	it("leaves the header's own path alone even when it knows the right one", () => {
+		// Rewriting a path would be inventing a finding on the model's behalf. The
+		// note carries the correction; the claim stays the model's.
+		expect(result.report).not.toContain("// src/events.ts:1\ntype QueuedEvent");
+	});
+
+	it("still says UNVERIFIED for code that is nowhere", () => {
+		expect(result.report).toContain("// src/budget.ts:40 — UNVERIFIED: not found in file");
+		expect(result.report).toContain("export const neverWritten = true;");
+	});
+
+	it("keeps every block's code bytes and fences intact", () => {
+		expect(result.report).toContain("  tags: string[]");
+		expect(result.report).toContain("  eventName: string");
+		expect(result.report.split(F)).toHaveLength(report.split(F).length);
+	});
+
+	it("counts partial, misattributed and fabricated apart from each other", () => {
+		// The old single number was 5 here, and a gate on it would fire almost
+		// entirely on the three blocks whose content is real.
+		expect(result.partial).toBe(3);
+		expect(result.misattributed).toBe(1);
+		expect(result.fabricated).toBe(1);
+	});
+
+	it("keeps every marked block visible to the quote extractor", () => {
+		// The regression this pins: a marker that defeats the header regex deletes
+		// the block from the verifier's denominator, so annotating a failure RAISES
+		// the fidelity score. Every new marker has to be stripped before the header
+		// is parsed, exactly as UNVERIFIED is.
+		const quotes = extractQuotes(result.report);
+		expect(quotes).toHaveLength(5);
+		expect(quotes.map((q) => `${q.file}:${q.startLine}`)).toEqual([
+			"src/budget.ts:1",
+			"src/budget.ts:3",
+			"src/budget.ts:1",
+			"src/budget.ts:30",
+			"src/budget.ts:40",
+		]);
+	});
+
+	it("produces identical text on a second pass", () => {
+		const again = reanchorReport(result.report, dir2);
+		expect(again.report).toBe(result.report);
+		expect(again.corrected).toBe(0);
+		expect(again.partial).toBe(3);
+		expect(again.misattributed).toBe(1);
+		expect(again.fabricated).toBe(1);
+	});
+
+	it("re-anchors a partial quote whose line number is also wrong", () => {
+		const drifted = [
+			`${F}ts`,
+			"// src/budget.ts:9",
+			"export type Entry = {",
+			"  kind: 'entry'",
+			"  tags: string[]",
+			"}",
+			F,
+			"",
+		].join("\n");
+		const out = reanchorReport(drifted, dir2);
+		// Corrected AND marked. The content is real, so the anchor is worth fixing;
+		// it is incomplete, so the caller is told.
+		expect(out.report).toContain("// src/budget.ts:3 — PARTIAL: lines omitted");
+		expect(out.corrected).toBe(1);
+		expect(out.partial).toBe(1);
+	});
+
+	it("does not hunt for misattribution outside the files the report cites", () => {
+		// `events.ts` exists and holds this verbatim, but a report that never
+		// mentions it gets no search of it. That bound is what keeps the cost
+		// inside a user's agent turn proportional to the report, not the repo.
+		const lonely = [
+			`${F}ts`,
+			"// src/budget.ts:30",
+			"type QueuedEvent = {",
+			"  eventName: string",
+			"  async: boolean",
+			"}",
+			F,
+			"",
+		].join("\n");
+		const out = reanchorReport(lonely, dir2);
+		expect(out.misattributed).toBe(0);
+		expect(out.fabricated).toBe(1);
+	});
+});
