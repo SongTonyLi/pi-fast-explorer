@@ -111,7 +111,7 @@ export const EXPLORE_PROMPT_GUIDELINES = [
  * five. On the four questions one explorer saturated it cost 3.6x for identical
  * recall. On `bash-approval` — added to give fan-out its best case, an answer
  * spanning four subsystems and ~5,100 lines — it cost 2.3x and scored LOWER
- * recall (0.80 against 1.00), missing `interactiveHandler.ts` in 4 of 5 runs
+ * recall (0.80 against 1.00), missing the same ground-truth file in 4 of 5 runs
  * despite a sub-question aimed squarely at it. That is partition blindness,
  * measured: each explorer covers its slice and stops, so the connective tissue
  * between subsystems falls through.

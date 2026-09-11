@@ -660,8 +660,8 @@ const MIN_EVIDENCE_CHARS = 8;
  * Of the 1,265 quotes in the stored reports, exactly three fall below it, and
  * all three are real evidence a reader would want:
  *
- *   // GET /api/sessions              20 chars, once in src/server/dashboard.ts
- *   // GET /api/events/sse            22 chars, once in src/server/dashboard.ts
+ *   // GET /api/sessions              20 chars, once in the cited file
+ *   // GET /api/events/sse            22 chars, once in the cited file
  *   clearedToolResults, / }           20 chars, once in microCompact.ts
  *
  * A blunt 24-character floor would have called all three trivial. Each occurs
