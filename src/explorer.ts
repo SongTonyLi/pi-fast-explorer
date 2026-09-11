@@ -204,3 +204,28 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		});
 	});
 }
+
+/**
+ * Runs tasks with a bounded number in flight, preserving input order in the
+ * returned array. maxFanout is validated to never exceed the limit, so in
+ * practice this runs a single wave.
+ */
+export async function runWithConcurrency<T>(
+	tasks: Array<() => Promise<T>>,
+	limit: number,
+): Promise<T[]> {
+	const results = new Array<T>(tasks.length);
+	let next = 0;
+
+	const worker = async (): Promise<void> => {
+		while (true) {
+			const index = next++;
+			if (index >= tasks.length) return;
+			results[index] = await tasks[index]!();
+		}
+	};
+
+	const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
+	await Promise.all(workers);
+	return results;
+}
