@@ -220,6 +220,22 @@ it is an additive change that does not affect the v1 architecture.
 `model: null` means inherit from the dispatching session. `minTotalBytes` is the
 bail-out floor described under "Performance".
 
+**Loading.** Config is resolved at every `session_start` from layers, lowest
+precedence first:
+
+1. the defaults above;
+2. `~/.pi/agent/fast-explorer.json` (user level), always read;
+3. `<project>/.pi/fast-explorer.json` (project level), **read only when the project
+   is trusted**.
+
+Project overrides user, and both override the defaults; `autoPromote` merges key by
+key rather than replacing wholesale. The project file is trust-gated because it
+lives inside the repository and is therefore attacker-supplied content in an
+untrusted clone: `model` would redirect exploration to a model of the repository's
+choosing and `timeoutMs` could stall the session, neither with any prompt to the
+user. An invalid file is reported and ignored — the previously resolved config stays
+in effect, rather than being silently replaced by the defaults.
+
 ## Performance
 
 Making the main agent faster is a requirement, so the latency budget is specified
@@ -431,14 +447,22 @@ area of the repo:
 | **File recall** | `|cited ∩ truth| / |truth|` | quality |
 | **File precision** | `|cited ∩ truth| / |cited|` | quality |
 | **Citation validity** | cited file exists and line range is in bounds | quality, mechanical |
-| **Quote fidelity** | verbatim block matches the file's actual bytes at those lines | quality, mechanical |
+| **Quote fidelity** | quoted block matches the file's lines at that position, compared line-wise after trimming | quality, mechanical |
 | Answer sufficiency | fixed rubric scored by an LLM judge | quality, noisy |
 | Cost | tokens × model price | cost |
 
 **Quote fidelity is the most valuable metric here.** Because the explorer contract
 requires verbatim code under `file:line` headers, every quoted block can be checked
-against the file on disk byte-for-byte. A mismatch is a hallucination, caught
-mechanically with no judge and no ambiguity. Any non-zero hallucination rate is a
+against the file on disk. A mismatch is a hallucination, caught mechanically with no
+judge and no ambiguity.
+
+The comparison as implemented is **not byte-for-byte**: each quoted line is trimmed
+and blank lines are dropped on both sides before comparing, so indentation and
+blank-line placement do not count. Models reliably reflow indentation when quoting
+into a report, and scoring that as a hallucination would make the detector cry wolf
+on citations that are in fact correct — a detector nobody trusts blocks nothing.
+Fabricated, paraphrased or mislocated content still fails, which is the property the
+metric exists for. Any non-zero hallucination rate is a
 release blocker — a confidently wrong citation is worse than no citation, because
 the main agent will trust it and skip verifying.
 
@@ -476,3 +500,21 @@ Deferred from v1, additive, and not affecting the architecture above:
 - **Synthesizer subagent** to reconcile contradictions between reports.
 - **Read-sequence detection** as a third trigger: N sequential reads in one turn
   with no edits promotes to exploration.
+
+## Implementation notes
+
+Recorded after the fact, because this spec did not anticipate it.
+
+**Explorers must be spawned with `--no-extensions`.** Verified against pi 0.85.1:
+neither print mode (`-p`) nor `--no-session` stops extension discovery, so without
+the flag every explorer loads *this extension*. The explorer prompt instructs
+explorers to issue every independent search in one message, so each explorer fires
+many greps, and each grep result then hits the auto-promotion hook and spawns
+another wave. The branching factor is per grep rather than per explorer — measured
+at roughly 40 per level, which is ~1,600 processes at depth two and ~64,000 at depth
+three. The flag is load-bearing, not tidiness.
+
+`--no-extensions` cannot cover an explicit `-e <path>` load, where discovery is
+never consulted, so there is a second layer: every explorer is spawned with
+`PI_FAST_EXPLORER_NESTED=1` in its environment (inherited by the whole subtree) and
+the auto-promotion hook returns early whenever it sees that variable.
