@@ -5,20 +5,32 @@
 **Package:** `pi-fast-explorer`
 
 Amendments are marked in place and dated rather than folded in silently, so a reader
-can tell which parts of this document were designed and which were measured. Two are
-large enough to name here, and both went against the design:
+can tell which parts of this document were designed and which were measured. Four are
+large enough to name here, and the first two went against the design:
 
 - The speed goal was falsified — see "Retired goal: speed (2026-09-11)".
 - The parallelism argument lost on the one question built to test it. Fan-out is no
   longer recommended anywhere in the shipped text — see "Open question: is fan-out
   ever worth it?".
+- **Two components in the architecture block were never built** — `planner.ts` and the
+  `/explore` slash command. The planner's absence was recorded under "Implementation
+  notes" but never in the block itself; the slash command's was recorded nowhere. See
+  "Amendment (2026-09-11): two components in this block were never built".
+- **Some figures in this document cannot be checked.** As of 2026-09-11 `bench/results/`
+  is committed, so every benchmark number here resolves to a file. Three sets of figures
+  do not, and are now labelled where they appear: the 49,985-mutation verifier sweep, the
+  one end-to-end auto-promotion run, and the fork-bomb branching factor. They were real
+  measurements; the artifacts were not kept.
 
 ## Problem
 
 When a pi agent needs to understand code spanning many files, it reads them one at
-a time into its own context. A sweep across 40 files can cost 300k tokens, and every
-one of those tokens is then dragged through every subsequent turn of the session
-until compaction throws them away.
+a time into its own context. A sweep across 40 files can cost on the order of 300k
+tokens — an illustrative figure with no measurement behind it — and every one of those
+tokens is then dragged through every subsequent turn of the session until compaction
+throws them away. What was later measured is smaller and points the same way: a single
+baseline sweep on the benchmark's questions left 14,860–56,420 tokens in the main
+context.
 
 The cost is not only tokens. Sequential reads are slow, and a context full of
 half-relevant file contents measurably degrades the model's reasoning on the task
@@ -269,6 +281,21 @@ spec did not anticipate**: pi exposes no turn-limit flag, so the number rides in
 task text as a request the model is free to exceed. Nothing in this design bounds
 turn count; the only hard stops are `timeoutMs` and the model's own context limit.
 
+Source, added 2026-09-11: `bench/results/2026-09-11T04-37-10.json`, the 7 records with
+`turnCapExceeded: true` — `persistence`/explorer run 4, `persistence`/fanout runs 1–5,
+`cache-safety`/fanout run 1, each with `turns: 6`. The denominator is the 40
+explorer-arm runs; the 20 baseline runs have no budget and cannot overrun one, and six
+of them did exceed 5 turns without that meaning anything. That build folded the overrun
+into `ok`, so `coverage` is `null` for all 7 and this spec could not say how good they
+were. Re-scoring their stored reports gives **recall 1.00 on all 7**
+(`bench/results/2026-09-11T04-37-10-turncap-rescore.json`), so the budget was discarding
+seven answers that were entirely correct. The claim above was, if anything, too weak.
+
+One qualification in the other direction: pi retries a failed turn up to 3 times by
+default and the failed attempt has already been emitted with its own usage, which
+`processLine` counts, so reported turn counts over-count retries. The overrun figures
+are an upper bound on real model turns.
+
 **Loading.** Config is resolved at every `session_start` from layers, lowest
 precedence first:
 
@@ -344,8 +371,11 @@ the per-sweep latency effect was measured going the other way.
 
 The shape of the trade is what makes it worth taking anyway: the latency and the
 cost are paid once, at the sweep, while the tokens would otherwise be paid on every
-turn after it. Measured, a baseline sweep left 23,896–48,956 tokens of file contents
-in the main context; an explorer report is 1,100–1,382 tokens. The explorer's own
+turn after it. Measured, a baseline sweep left 14,860–56,420 tokens of file contents
+in the main context; an explorer report is 1,100–1,382 tokens. (Corrected 2026-09-11:
+this range was 23,896–48,956, which was one of three 5-run context samples taken at the
+same settings. All three are now committed and the range spans them — see "Context" in
+the README.) The explorer's own
 reading is spent in a subprocess and discarded on exit, so it never enters the main
 context at all — which is why per-run cost and per-run context are different
 measurements and must not be collapsed into one.
@@ -520,14 +550,36 @@ path retained as the fallback; the choice is an implementation detail behind
 
 ```
 fast-explorer/
-├── index.ts          # registers explore tool, grep hook, /explore command
+├── index.ts          # registers explore tool, grep hook, /explore command   ← NOT BUILT: no slash command
 ├── explorer.ts       # spawn + stream one pi subprocess, abort handling
 ├── partition.ts      # shape-dependent split
-├── planner.ts        # sub-question decomposition (Path A only)
+├── planner.ts        # sub-question decomposition (Path A only)              ← NOT BUILT
 ├── synthesis.ts      # merge + dedup reports
 ├── config.ts         # settings + defaults
 └── prompts/explorer.md
 ```
+
+#### Amendment (2026-09-11): two components in this block were never built
+
+The block above is the design, not the package. Two of the things it names do not exist
+in `src/`, and until now only one of them said so anywhere.
+
+- **`planner.ts`** — designed as the Path A fallback that decomposes a bare `question`
+  into sub-questions. Not built. This was already recorded under "Implementation notes"
+  (*"No planner shipped in v1"*), but the architecture block itself was never corrected,
+  so a reader arriving here first was told a module exists that does not. It is kept in
+  the listing rather than deleted because the reason it was dropped is the interesting
+  part: the benchmark then measured decomposition *losing* — 3.6x the cost for identical
+  recall on saturated questions, and lower recall on the one question built to favour it
+  — so the missing planner turned out to be the absence of a mechanism that had no
+  measured case in its favour. See "Open question: is fan-out ever worth it?".
+- **The `/explore` slash command** — named in the `index.ts` comment. Not built, and
+  never disclosed anywhere until this amendment. No slash command is registered anywhere
+  in `src/`; the two entry paths that exist are the `explore` tool and the `tool_result`
+  hook. Nothing was measured about this one — it was simply not needed once the model
+  could call the tool directly, and it was dropped without a note.
+
+Everything else in the block is real and carries the responsibilities described below.
 
 Each module has one responsibility and a narrow interface:
 
@@ -633,12 +685,26 @@ backstop for everything else. This spec does not depend on any compaction work.
 - **A benchmark suite** measuring speed *and* quality against a real repository.
   Specified in full below.
 
-As built: 313 unit tests across 18 files, plus the benchmark. The end-to-end fixture
-test in the third bullet was **not** written — the benchmark subsumed it for the
-`explore` path, which now has 90 real explorer runs behind it across two sweeps. It did not subsume it
-for the auto-promotion path: no real `grep` result has ever tripped the `tool_result`
-hook, been bucketed, spawned explorers and had its content replaced. That seam is
-covered by unit tests on each side of it and by nothing that crosses it.
+As built: **345 unit tests across 19 files** (`npx vitest --run`, 2026-09-11), plus the
+benchmark. The end-to-end fixture test in the third bullet was **not** written — the
+benchmark subsumed it for the `explore` path, which now has 90 real explorer runs behind
+it across two sweeps.
+
+#### Amendment (2026-09-11): the auto-promotion seam has now been crossed, once
+
+This section said *"no real `grep` result has ever tripped the `tool_result` hook, been
+bucketed, spawned explorers and had its content replaced."* That has been false since
+commit `af1bb37`. A real `gpt-5.6-luna` session on pi's default toolbelt ran
+`rg -n --hidden --glob '!node_modules' 'tool_use_id' src/` through the `bash` tool, and
+the hook promoted it: 105 files, four buckets, 311 match lines replaced by cited findings.
+
+Two caveats keep this from being the end-to-end test the bullet asked for. **The run was
+not recorded** — no artifact, no session log, no spill file survives it, so its figures
+are an unreproducible measurement rather than something a reader can check; they are
+flagged as such in README limitation 8. And it establishes only that the path *executes*.
+Nobody has scored a promoted result the way the benchmark scores `explore`, so the
+quality of what auto-promotion returns is still unmeasured. The seam is crossed; it is
+not covered.
 
 ## Benchmark
 
@@ -747,7 +813,12 @@ silently passed, which makes a bad citation visible but does not make it zero.
 known-good quotes: 182 escaped (0.364%), every one an all-comment quote where
 deleting a word still leaves a contiguous verbatim run — which the `reflowed`
 verdict accepts by design. On quotes containing code, 43,777 mutations were injected
-and none escaped. Tightening it trades these escapes for false fabrication reports
+and none escaped. **Unreproducible measurement (noted 2026-09-11):** that sweep was a
+one-off script that was not kept, and no artifact, test or data file for it exists in
+the repository — these four figures resolve to nothing checkable. The soft spot itself
+is readable out of `src/citations.ts` (`locateReflow` is gated to all-comment quotes);
+only the rates depend on the lost sweep. Tightening it trades these escapes for false
+fabrication reports
 on legitimately re-wrapped comments, which is the worse failure for a detector whose
 only value is being believed. Recorded next to the fidelity number rather than
 fixed.
@@ -773,7 +844,10 @@ signature this metric pair was built to catch, and it caught it.
 - Report per-arm cost so a quality win bought with a large cost increase is visible
   rather than hidden.
 - Results are written to `bench/results/<date>.json` and a summary table to stdout,
-  so runs are comparable across commits.
+  so runs are comparable across commits. Amended 2026-09-11: those artifacts were
+  gitignored, which made every number in this spec and the README uncheckable from a
+  clone. They are committed now, with the verbatim report text stripped — it quoted
+  ~1 MB of a private corpus. Every published figure is a field that survives the strip.
 - Gate on wide margins. The suite exists to catch regressions, not jitter.
 
 ### What the benchmark cannot tell you
@@ -830,9 +904,12 @@ neither print mode (`-p`) nor `--no-session` stops extension discovery, so witho
 the flag every explorer loads *this extension*. The explorer prompt instructs
 explorers to issue every independent search in one message, so each explorer fires
 many greps, and each grep result then hits the auto-promotion hook and spawns
-another wave. The branching factor is per grep rather than per explorer — measured
+another wave. The branching factor is per grep rather than per explorer — estimated
 at roughly 40 per level, which is ~1,600 processes at depth two and ~64,000 at depth
-three. The flag is load-bearing, not tidiness.
+three. The flag is load-bearing, not tidiness. (An earlier version called the 40
+"measured"; it has no artifact, so the depth-two and depth-three figures are only as
+good as that estimate. What was observed, and is the actual argument for the flag, is
+that the recursion happens at all.)
 
 `--no-extensions` cannot cover an explicit `-e <path>` load, where discovery is
 never consulted, so there is a second layer: every explorer is spawned with

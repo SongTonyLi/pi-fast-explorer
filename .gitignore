@@ -1,5 +1,11 @@
 node_modules/
 dist/
-bench/results/
+# bench/results/*.json IS tracked — every number in README.md and the design spec
+# has to resolve to a file someone who clones this can open. What is not tracked is
+# the verbatim report text those runs produced: it embeds ~1 MB of source from the
+# benchmark corpus, which is a private third-party repository. `bench/run.ts` writes
+# reports into the artifact; they are stripped before commit and the untouched
+# originals stay here.
+bench/results/raw-reports/
 *.log
 .claude-flow/
