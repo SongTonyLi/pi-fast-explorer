@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import type { FastExplorerConfig } from "./config.js";
 
 const FILES_PER_EXPLORER = 8;
 
@@ -42,4 +43,29 @@ export function bucketByDirectory(files: string[], n: number): string[][] {
 	}
 
 	return buckets.filter((b) => b.length > 0);
+}
+
+export interface ExploreDecision {
+	explore: boolean;
+	reason: string;
+}
+
+export function shouldExplore(
+	fileCount: number,
+	totalBytes: number,
+	cfg: FastExplorerConfig,
+): ExploreDecision {
+	if (fileCount < cfg.autoPromote.minFiles) {
+		return {
+			explore: false,
+			reason: `${fileCount} files is below the ${cfg.autoPromote.minFiles} file threshold`,
+		};
+	}
+	if (totalBytes < cfg.minTotalBytes) {
+		return {
+			explore: false,
+			reason: `${totalBytes} bytes is below the ${cfg.minTotalBytes} byte threshold`,
+		};
+	}
+	return { explore: true, reason: "" };
 }

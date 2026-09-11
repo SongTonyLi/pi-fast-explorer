@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { bucketByDirectory, computeFanout } from "../src/partition.js";
+import { resolveConfig } from "../src/config.js";
+import { bucketByDirectory, computeFanout, shouldExplore } from "../src/partition.js";
 
 describe("computeFanout", () => {
 	it("floors at 2", () => {
@@ -41,5 +42,25 @@ describe("bucketByDirectory", () => {
 
 	it("returns empty for no files", () => {
 		expect(bucketByDirectory([], 3)).toEqual([]);
+	});
+});
+
+describe("shouldExplore", () => {
+	const cfg = resolveConfig();
+
+	it("skips when there are too few files", () => {
+		const d = shouldExplore(3, 10_000_000, cfg);
+		expect(d.explore).toBe(false);
+		expect(d.reason).toMatch(/files/);
+	});
+
+	it("skips when total bytes are below the floor", () => {
+		const d = shouldExplore(50, 1024, cfg);
+		expect(d.explore).toBe(false);
+		expect(d.reason).toMatch(/bytes/);
+	});
+
+	it("explores when both thresholds are cleared", () => {
+		expect(shouldExplore(50, 500_000, cfg).explore).toBe(true);
 	});
 });
