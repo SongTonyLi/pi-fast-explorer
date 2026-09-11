@@ -8,13 +8,34 @@ import type { FastExplorerConfig } from "./config.js";
  */
 export const EXPLORER_TOOLS = "read,grep,find,ls";
 
+/**
+ * Set in every explorer subprocess. The auto-promotion hook in index.ts refuses
+ * to run when it sees this.
+ *
+ * This is the second of two layers against a fork bomb. An explorer's only real
+ * tools are grep and find, and the explorer prompt tells it to issue ten
+ * searches per turn. If the auto-promotion hook were live inside an explorer,
+ * every one of those searches would spawn a fresh wave of explorers, each of
+ * which would do the same: a branching factor of roughly maxFanout per grep, not
+ * per turn. Layer one is `--no-extensions`; this layer covers the case that flag
+ * cannot, namely a wrapper that loads us through an explicit `-e path`, where
+ * discovery never happens and `--no-extensions` is therefore not consulted.
+ */
+export const NESTED_ENV_VAR = "PI_FAST_EXPLORER_NESTED";
+
 export function buildExplorerArgs(
 	cfg: FastExplorerConfig,
 	model: string | null,
 	promptPath: string,
 	task: string,
 ): string[] {
-	const args = ["--mode", "json", "-p", "--no-session"];
+	// `--no-extensions` is load-bearing, not tidiness. Verified against pi 0.85.1:
+	// print mode and `--no-session` do NOT stop extension discovery, so without
+	// this flag an explorer loads *this* extension and its grep results promote
+	// into yet more explorers. Explicit `-e` paths still load, and we pass none.
+	// It is also correct on its own terms: an explorer running arbitrary user
+	// extensions is neither read-only nor reproducible.
+	const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
 	if (model) args.push("--model", model);
 	// Thinking is off even when the model is inherited: retrieval is not
 	// reasoning, and per-turn latency is the dominant cost. See spec.
@@ -187,7 +208,13 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		let graceTimer: ReturnType<typeof setTimeout> | undefined;
 		let drainTimer: ReturnType<typeof setTimeout> | undefined;
 
-		const proc = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+		const proc = spawn(command, args, {
+			cwd,
+			shell: false,
+			stdio: ["ignore", "pipe", "pipe"],
+			// Inherited by the whole subtree, so the guard holds at any depth.
+			env: { ...process.env, [NESTED_ENV_VAR]: "1" },
+		});
 		proc.on("spawn", () => {
 			spawned = true;
 		});

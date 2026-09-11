@@ -96,6 +96,16 @@ const twoPassStub = stub(
 setTimeout(() => process.stdout.write(${msgLine("second pass")} + "\\n", () => process.exit(0)), 60);`,
 );
 
+// Reports back whatever the nesting marker was set to in its environment, plus
+// an inherited variable, so the test can tell "env was replaced" apart from
+// "env was extended".
+const envStub = stub(
+	"env.mjs",
+	`const text = "NESTED=" + (process.env.PI_FAST_EXPLORER_NESTED ?? "unset") + " PATH=" + (process.env.PATH ? "inherited" : "missing");
+const msg = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 1, output: 1, cost: { total: 0.001 } }, stopReason: "stop" } };
+process.stdout.write(JSON.stringify(msg) + "\\n", () => process.exit(0));`,
+);
+
 const grandchildStub = stub("grandchild.mjs", `setTimeout(() => {}, 3000);`);
 
 // Exits cleanly, but leaves a grandchild holding the inherited stdio pipes, so
@@ -323,6 +333,21 @@ describe("runExplorer", () => {
 		expect(r.report).toContain("report from parent");
 		// Settled off the drain timer, not by outwaiting the 3s grandchild.
 		expect(elapsed).toBeLessThan(2500);
+	});
+
+	// Second fork-bomb layer. `--no-extensions` stops pi discovering us inside an
+	// explorer, but a wrapper can load us explicitly with `-e`, bypassing
+	// discovery. The hook reads this marker and refuses to promote under it.
+	it("marks the child environment as nested, without clobbering the rest of env", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [envStub],
+			brief: "find r",
+			cfg: resolveConfig(),
+			cwd: dir,
+		});
+		expect(r.ok).toBe(true);
+		expect(r.report).toBe("NESTED=1 PATH=inherited");
 	});
 
 	it("reports the whole accumulated report on each progress callback", async () => {

@@ -10,6 +10,7 @@ describe("buildExplorerArgs", () => {
 			"json",
 			"-p",
 			"--no-session",
+			"--no-extensions",
 			"--model",
 			"claude-opus-5",
 			"--thinking",
@@ -25,6 +26,21 @@ describe("buildExplorerArgs", () => {
 	it("carries the configured turn budget into the task", () => {
 		const args = buildExplorerArgs(resolveConfig({ maxTurnsPerExplorer: 3 }), "m", "/tmp/p.md", "t");
 		expect(args.at(-1)).toBe("Task: t\n\nComplete this in at most 3 turns.");
+	});
+
+	// DO NOT DELETE AS REDUNDANT WITH THE toEqual PIN ABOVE. This flag is the
+	// fork-bomb guard, and it is asserted separately so that a future rewrite of
+	// the argv pin cannot drop it silently.
+	//
+	// Verified against pi 0.85.1: neither `-p` nor `--no-session` stops extension
+	// discovery in a subprocess (core/resource-loader.js gates only on the
+	// `--no-extensions` flag). Without this, an explorer loads this very
+	// extension, its own greps trip auto-promotion, and each spawns another wave
+	// of explorers. The explorer prompt asks for ten searches per turn, so the
+	// branching is per-grep: ~40 processes at depth 1, ~1600 at depth 2.
+	it("passes --no-extensions so an explorer cannot re-enter this extension", () => {
+		const args = buildExplorerArgs(resolveConfig(), "m", "/tmp/p.md", "t");
+		expect(args).toContain("--no-extensions");
 	});
 
 	it("never grants bash", () => {
