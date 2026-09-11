@@ -6,6 +6,8 @@ import { verifyCitation, verifyQuote } from "../src/citations.js";
 
 const dir = mkdtempSync(join(tmpdir(), "fx-cite-"));
 writeFileSync(join(dir, "a.ts"), "one\ntwo\nthree\nfour\n");
+// Blank line at line 3, used to exercise the blank-line scan in verifyQuote.
+writeFileSync(join(dir, "b.ts"), "one\ntwo\n\nthree\nfour\n");
 
 describe("verifyCitation", () => {
 	it("accepts an in-bounds range", () => {
@@ -38,5 +40,33 @@ describe("verifyQuote", () => {
 
 	it("ignores leading and trailing whitespace differences", () => {
 		expect(verifyQuote({ file: "a.ts", startLine: 2, code: "  two\n  three  " }, dir).valid).toBe(true);
+	});
+
+	it("accepts a correct quote that spans a blank line in the file", () => {
+		const r = verifyQuote({ file: "b.ts", startLine: 2, code: "two\nthree" }, dir);
+		expect(r.valid).toBe(true);
+	});
+
+	it("rejects an empty quote", () => {
+		const r = verifyQuote({ file: "b.ts", startLine: 1, code: "" }, dir);
+		expect(r.valid).toBe(false);
+		expect(r.reason).toMatch(/empty/i);
+	});
+
+	it("rejects a whitespace-only quote", () => {
+		const r = verifyQuote({ file: "b.ts", startLine: 1, code: "   \n  " }, dir);
+		expect(r.valid).toBe(false);
+	});
+
+	it("rejects a startLine past end of file", () => {
+		const r = verifyQuote({ file: "b.ts", startLine: 999, code: "two" }, dir);
+		expect(r.valid).toBe(false);
+		expect(r.reason).toMatch(/out of bounds/i);
+	});
+
+	it("rejects a quote that runs past end of file", () => {
+		const r = verifyQuote({ file: "b.ts", startLine: 4, code: "three\nfour\nFIVE" }, dir);
+		expect(r.valid).toBe(false);
+		expect(r.reason).toMatch(/past end/i);
 	});
 });

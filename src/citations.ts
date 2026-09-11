@@ -70,27 +70,38 @@ export function verifyCitation(c: Citation, cwd: string): VerifyResult {
 	return { valid: true };
 }
 
-/** Normalizes indentation so reflowed quotes are not counted as hallucinations. */
-function normalize(text: string): string {
-	return text
-		.split("\n")
-		.map((l) => l.trim())
-		.filter((l) => l.length > 0)
-		.join("\n");
-}
-
 export function verifyQuote(q: Quote, cwd: string): VerifyResult {
 	const lines = readLines(q.file, cwd);
 	if (!lines) return { valid: false, reason: `file not found: ${q.file}` };
 
-	const quoted = normalize(q.code);
-	if (!quoted) return { valid: true };
+	const quoted = q.code
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0);
 
-	const span = quoted.split("\n").length;
+	// A header with no code body is a malformed citation, not a verified one.
+	if (quoted.length === 0) {
+		return { valid: false, reason: `empty quote for ${q.file}:${q.startLine}` };
+	}
+
 	const start = q.startLine - 1;
-	const actual = normalize(lines.slice(start, start + span).join("\n"));
+	if (start < 0 || start >= lines.length) {
+		return { valid: false, reason: `line ${q.startLine} out of bounds for ${q.file}` };
+	}
 
-	if (actual !== quoted) {
+	// Scan forward collecting non-blank lines. Slicing a fixed span would run
+	// short whenever the cited range contains blank lines, since the quote's
+	// line count is measured after blanks are dropped.
+	const actual: string[] = [];
+	for (let i = start; i < lines.length && actual.length < quoted.length; i++) {
+		const t = lines[i]!.trim();
+		if (t.length > 0) actual.push(t);
+	}
+
+	if (actual.length < quoted.length) {
+		return { valid: false, reason: `quote extends past end of ${q.file}` };
+	}
+	if (actual.join("\n") !== quoted.join("\n")) {
 		return { valid: false, reason: `quote does not match ${q.file}:${q.startLine}` };
 	}
 	return { valid: true };
