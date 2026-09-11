@@ -48,19 +48,28 @@ describe("bucketByDirectory", () => {
 describe("shouldExplore", () => {
 	const cfg = resolveConfig();
 
-	it("skips when there are too few files", () => {
-		const d = shouldExplore(3, 10_000_000, cfg);
-		expect(d.explore).toBe(false);
-		expect(d.reason).toMatch(/files/);
-	});
-
 	it("skips when total bytes are below the floor", () => {
-		const d = shouldExplore(50, 1024, cfg);
+		const d = shouldExplore(1024, cfg);
 		expect(d.explore).toBe(false);
 		expect(d.reason).toMatch(/bytes/);
 	});
 
-	it("explores when both thresholds are cleared", () => {
-		expect(shouldExplore(50, 500_000, cfg).explore).toBe(true);
+	it("explores once the byte floor is cleared", () => {
+		expect(shouldExplore(500_000, cfg).explore).toBe(true);
+	});
+
+	it("treats the floor as inclusive", () => {
+		expect(shouldExplore(cfg.minTotalBytes, cfg).explore).toBe(true);
+	});
+
+	// Regression, and the reason the signature is what it is. This gate used to
+	// take a fileCount and re-apply `autoPromote.minFiles`, which made the
+	// match-density trigger unreachable: a dense result is by definition below
+	// that floor, so shouldAutoPromote promoted it and shouldExplore instantly
+	// rejected it, leaving `autoPromote.minMatches` as dead config. Breadth
+	// belongs to shouldAutoPromote; this is a byte question only. Arity is
+	// asserted so that reintroducing a file-count parameter fails here loudly.
+	it("takes only bytes and config, never a file count", () => {
+		expect(shouldExplore.length).toBe(2);
 	});
 });

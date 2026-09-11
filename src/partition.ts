@@ -50,17 +50,22 @@ export interface ExploreDecision {
 	reason: string;
 }
 
-export function shouldExplore(
-	fileCount: number,
-	totalBytes: number,
-	cfg: FastExplorerConfig,
-): ExploreDecision {
-	if (fileCount < cfg.autoPromote.minFiles) {
-		return {
-			explore: false,
-			reason: `${fileCount} files is below the ${cfg.autoPromote.minFiles} file threshold`,
-		};
-	}
+/**
+ * The byte half of the promotion decision: is there enough material here that
+ * spawning LLM subprocesses beats just handing the matches to the main agent?
+ *
+ * Breadth is deliberately NOT re-checked here. `shouldAutoPromote` owns the
+ * question "is this a sweep worth promoting", on breadth or on density;
+ * `shouldExplore` owns only "is it big enough to be worth the overhead".
+ *
+ * The seam used to be drawn differently and the two gates contradicted each
+ * other: this function also required `fileCount >= autoPromote.minFiles`, the
+ * very same threshold `shouldAutoPromote`'s density branch fires *below*. Every
+ * match-dense result was promoted by one gate and then immediately rejected by
+ * the other, which made `autoPromote.minMatches` dead config. Keep the
+ * responsibilities split; do not reintroduce a file count here.
+ */
+export function shouldExplore(totalBytes: number, cfg: FastExplorerConfig): ExploreDecision {
 	if (totalBytes < cfg.minTotalBytes) {
 		return {
 			explore: false,
