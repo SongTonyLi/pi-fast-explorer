@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { FastExplorerConfig } from "./config.js";
 
 /**
@@ -120,27 +121,59 @@ export interface RunExplorerOptions {
 	cwd: string;
 	signal?: AbortSignal;
 	onUpdate?: (partial: string) => void;
+	/** Overridable so tests need not wait out the production grace period. */
+	sigkillGraceMs?: number;
 }
 
 const SIGKILL_GRACE_MS = 5000;
 
+/** Errors and stack traces land at the end of a stream, so we keep the tail. */
+const STDERR_TAIL_CHARS = 8192;
+
 export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
-	const { command, args, brief, cfg, cwd, signal, onUpdate } = opts;
+	const {
+		command,
+		args,
+		brief,
+		cfg,
+		cwd,
+		signal,
+		onUpdate,
+		sigkillGraceMs = SIGKILL_GRACE_MS,
+	} = opts;
 
 	return new Promise<ExplorerResult>((resolve) => {
 		const acc = createAccumulator();
+
+		// Already aborted: spawning a process only to kill it is pure cost.
+		if (signal?.aborted) {
+			resolve({ brief, report: "", ok: false, error: "Explorer aborted", usage: acc.usage });
+			return;
+		}
+
+		// Decoders span chunk boundaries; a UTF-8 sequence can straddle one and
+		// decoding each chunk in isolation would corrupt it into U+FFFD.
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let stderr = "";
 		let buffer = "";
 		let settled = false;
 		let failure: string | undefined;
+		let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const proc = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 
 		const kill = () => {
 			proc.kill("SIGTERM");
-			setTimeout(() => {
-				if (!proc.killed) proc.kill("SIGKILL");
-			}, SIGKILL_GRACE_MS);
+			graceTimer = setTimeout(() => {
+				// `proc.killed` only records that a signal was *sent*, so it is
+				// already true here and could never gate the escalation. Liveness
+				// is the real question: has the child actually exited yet?
+				if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+			}, sigkillGraceMs);
+			// The child's own stdio handles hold the loop open until it dies, so
+			// unref costs no kill guarantee and avoids pinning the loop ourselves.
+			graceTimer.unref();
 		};
 
 		const timer = setTimeout(() => {
@@ -152,21 +185,25 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			failure = "Explorer aborted";
 			kill();
 		};
-		if (signal) {
-			if (signal.aborted) onAbort();
-			else signal.addEventListener("abort", onAbort, { once: true });
-		}
+		signal?.addEventListener("abort", onAbort, { once: true });
 
 		const finish = (result: ExplorerResult) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (graceTimer) clearTimeout(graceTimer);
 			signal?.removeEventListener("abort", onAbort);
 			resolve(result);
 		};
 
+		const appendStderr = (text: string) => {
+			if (!text) return;
+			stderr += text;
+			if (stderr.length > STDERR_TAIL_CHARS) stderr = stderr.slice(-STDERR_TAIL_CHARS);
+		};
+
 		proc.stdout.on("data", (chunk: Buffer) => {
-			buffer += chunk.toString();
+			buffer += stdoutDecoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line, acc);
@@ -174,7 +211,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		});
 
 		proc.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+			appendStderr(stderrDecoder.write(chunk));
 		});
 
 		proc.on("error", (err) => {
@@ -188,6 +225,8 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		});
 
 		proc.on("close", (code) => {
+			buffer += stdoutDecoder.end();
+			appendStderr(stderrDecoder.end());
 			if (buffer.trim()) processLine(buffer, acc);
 			const report = extractFinalText(acc);
 			const error =
