@@ -28,6 +28,9 @@ sweep has already been paid for many times over.
 - Never destroy information — every finding carries a `file:line` citation, and raw
   data remains reachable on disk.
 - Require no change to how the user works.
+- **Make the main agent faster, measurably** — both on the exploration turn itself
+  and on every turn after it. This is a hard requirement with an acceptance test,
+  not an expected side effect. See "Performance".
 
 ## Non-goals
 
@@ -65,11 +68,17 @@ coming.
 
 ```ts
 explore({
-  question: string,   // what to find out
-  scope?: string,     // optional glob or directory to limit the search
-  fanout?: number,    // override the computed fan-out
+  question: string,     // what to find out
+  questions?: string[], // optional pre-decomposed sub-questions, one per explorer
+  scope?: string,       // optional glob or directory to limit the search
+  fanout?: number,      // override the computed fan-out
 })
 ```
+
+`questions` exists for latency. The main agent is already reasoning when it decides
+to explore, so it can decompose the problem **in the same turn**, eliminating a
+blocking planner round-trip entirely. `promptGuidelines` instructs the model to
+supply `questions` whenever it can. The planner is the fallback, not the default.
 
 `promptGuidelines` must name the tool explicitly — "Use explore when you need to
 understand code spanning more than ~5 files" — because pi appends guideline bullets
@@ -93,15 +102,20 @@ Shape-dependent — the input determines the split.
 | File list (Path B) | Bucket by directory | Preserves module locality; no planner call needed |
 | Question (Path A) | Decompose into sub-questions | The right split is conceptual, not spatial |
 
-Path A runs a single cheap planner call producing `[{ brief, globs }]`, 2–6 items.
+Path A uses `questions` when the caller supplied them. Only when it did not, and the
+question cannot be split heuristically by `scope` or directory structure, does it
+fall back to a planner call producing `[{ brief, globs }]`.
 
 Fan-out is determined per path:
 
-- **Path A** — one explorer per planner item. The planner is instructed to produce
-  between 2 and `maxFanout` items. An explicit `fanout` argument on the tool call
-  overrides that bound.
+- **Path A** — one explorer per sub-question, bounded by `maxFanout`. An explicit
+  `fanout` argument overrides that bound.
 - **Path B** — `clamp(ceil(files / 8), 2, maxFanout)`, since the file count is known
   before any model call.
+
+**`maxFanout` must never exceed `concurrency`.** Fanning out 6 explorers against a
+concurrency limit of 4 produces two waves and doubles wall-clock for no benefit.
+Both default to 4, and config validation rejects `maxFanout > concurrency`.
 
 Over-fanning a small job is pure loss, since each explorer pays a fixed spawn,
 system-prompt, tool definition, and `AGENTS.md` cost. That is what the lower bound
@@ -144,10 +158,18 @@ invisible to the main agent.
 ```
 pi --mode json -p --no-session \
    --model <inherited or configured> \
+   --thinking off \
    --tools read,grep,find,ls \
    --append-system-prompt prompts/explorer.md \
    "Task: <brief>"
 ```
+
+**Thinking is off by default, even though the model is inherited.** Retrieval is not
+reasoning. Extended thinking is a large per-turn latency cost that buys very little
+on "find the relevant code and cite it" — whereas the *model* choice is what governs
+relevance judgment, which is why that is inherited. Separating the two knobs keeps
+the quality of an inherited model at roughly the speed of a small one. This is the
+single largest latency lever in the design.
 
 **`bash` is deliberately excluded.** Limiting explorers to `read, grep, find, ls`
 gives a structural read-only guarantee — an explorer cannot mutate the repository or
@@ -184,15 +206,91 @@ it is an additive change that does not affect the v1 architecture.
 {
   "fastExplorer": {
     "model": null,
-    "maxFanout": 6,
+    "thinking": "off",
+    "maxFanout": 4,
     "concurrency": 4,
+    "maxTurnsPerExplorer": 5,
+    "minTotalBytes": 51200,
     "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
     "timeoutMs": 120000
   }
 }
 ```
 
-`model: null` means inherit from the dispatching session.
+`model: null` means inherit from the dispatching session. `minTotalBytes` is the
+bail-out floor described under "Performance".
+
+## Performance
+
+Making the main agent faster is a requirement, so the latency budget is specified
+rather than assumed.
+
+### Where the time actually goes
+
+The baseline is faster than it first appears: pi executes sibling tool calls
+concurrently by default (`docs/extensions.md:784`), so an unaided main agent can
+already issue eight reads in a single turn. fast-explorer is not competing against
+sequential file reads — it is competing against a handful of wide, parallel turns.
+
+The governing relationship is:
+
+```
+explorer wall-clock ≈ (turns per explorer) × (per-turn latency)
+```
+
+Fan-out width barely appears in it. **Parallelism across explorers does not reduce
+the number of sequential LLM turns inside any one explorer.** Optimising for speed
+therefore means minimising turns per explorer and per-turn latency, not widening the
+fan-out. Every lever below follows from that.
+
+### Levers, in order of impact
+
+1. **Thinking off** (`--thinking off`) while inheriting the model. Largest single
+   reduction in per-turn latency, and it costs no relevance quality.
+2. **No blocking planner.** `questions` lets the main agent decompose in the turn it
+   already occupies, removing a serial round-trip from the critical path.
+3. **`maxFanout == concurrency`.** Guarantees one wave, so wall-clock is the slowest
+   single explorer rather than the sum of two batches.
+4. **Turn budget plus parallel-tool instruction.** `prompts/explorer.md` directs
+   explorers to issue every independent search in a single message, since pi runs
+   them concurrently. An explorer making ten greps at once costs roughly one round,
+   not ten. `maxTurnsPerExplorer` caps the tail.
+5. **Bail out when exploration cannot pay.** If total candidate bytes fall below
+   `minTotalBytes`, return the files directly. Below that floor, reading is both
+   faster and higher fidelity than any subagent.
+
+### The durable win
+
+Independent of the exploration turn, every subsequent turn in the session carries a
+smaller context, so prefill and time-to-first-token drop for the rest of the
+session. It also postpones auto-compaction, which is a multi-second synchronous
+stall. This compounds, and it is the larger effect over a long session — but it is
+deliberately not the only justification, because a design that is slower at the
+moment the user is watching is a design that feels slow.
+
+### Acceptance criteria
+
+These are falsifiable and belong in the test suite, not in the README:
+
+- On the fixture repository, `explore` over a ~40-file sweep completes in **no more
+  wall-clock than the unaided main agent** performing the same sweep.
+- Main-agent context after exploration is **at least 5× smaller** than after the
+  unaided sweep.
+- Median per-turn time-to-first-token for the ten turns following exploration is
+  **lower** than for the ten turns following an unaided sweep.
+
+If the first criterion fails, the guard rails are wrong and the thresholds move —
+the feature must not ship as a latency regression. These are measured by the
+benchmark suite described under "Benchmark", not asserted by hand.
+
+### Open question: in-process explorers
+
+Each subprocess pays node startup, config load, and `AGENTS.md` parsing. pi exports
+`createAgentSession()` from its SDK, which would allow running explorers in-process
+and eliminating that fixed cost. This trades process isolation and abort simplicity
+for startup latency. **To be measured during implementation**, with the subprocess
+path retained as the fallback; the choice is an implementation detail behind
+`explorer.ts` and does not affect the rest of the architecture.
 
 ## Architecture
 
@@ -234,7 +332,11 @@ surprises.
   This wastes tokens and can produce inconsistent descriptions of the same entity
   across reports.
 - **Fixed overhead per explorer** — spawn, system prompt, tool definitions,
-  `AGENTS.md` — paid N times. The fan-out floor exists to prevent this dominating.
+  `AGENTS.md` — paid N times. The fan-out floor and `minTotalBytes` exist to prevent
+  this dominating; in-process explorers may remove it entirely (see "Performance").
+- **Latency floor set by the slowest explorer.** One explorer that needs five turns
+  makes the whole sweep five turns long, however many others finished in one.
+  Bucketing aims for balance but cannot guarantee it.
 - **Non-determinism.** Parallel LLM calls give different answers across runs, which
   makes behaviour harder to test and to trust.
 - **Auto-promote false positives.** A grep the model intended as a quick existence
@@ -247,7 +349,9 @@ surprises.
 
 Encoded as guard rails in the tool description and the auto-promote threshold:
 
-- Fewer than ~8 candidate files — reading them directly is cheaper and better
+- Total candidate bytes below `minTotalBytes` (default 50KB) — reading directly is
+  both faster and higher fidelity
+- Fewer than ~8 candidate files
 - The agent already knows the exact file and line
 - Edit-heavy rather than search-heavy work
 - Interactive debugging where the agent needs to iterate on real output
@@ -276,6 +380,81 @@ backstop for everything else. This spec does not depend on any compaction work.
 - One end-to-end test against a fixture repository, asserting the citation contract
   holds (every `## Files Retrieved` entry resolves to a real file and line range)
   rather than asserting on model prose, which is non-deterministic.
+- **A benchmark suite** measuring speed *and* quality against a real repository.
+  Specified in full below.
+
+## Benchmark
+
+Unit tests cannot tell us whether exploration is actually good. The benchmark is a
+separate, explicitly-invoked suite (`npm run bench`) that measures fast-explorer
+against an unaided baseline on a real codebase.
+
+### Corpus
+
+Default target: `~/claude-plus-plus` — a large, real, deeply-structured TypeScript
+codebase with genuine multi-file subsystems.
+
+The path is configurable via `BENCH_REPO`, and the suite **skips with a clear
+message when the repository is absent**. A published package must not hard-depend on
+a local clone, and CI will not have one.
+
+### Baseline
+
+The same model and the same question, with fast-explorer disabled, instructed to
+investigate the codebase directly. Capped at a fixed turn limit so a runaway
+baseline cannot hang the suite; hitting the cap is recorded as a baseline failure
+rather than silently discarded.
+
+### Questions
+
+Each question has an independently-established ground-truth file set. Ground truth
+must be derived by exhaustive search or human review, **not** by running
+fast-explorer — otherwise the benchmark grades itself.
+
+Initial set, spanning more than one subsystem so results do not overfit to a single
+area of the repo:
+
+| # | Question | Ground truth (illustrative) |
+|---|---|---|
+| 1 | How does microcompaction decide which tool results to clear? | `services/compact/microCompact.ts`, `timeBasedMCConfig.ts` |
+| 2 | Where are large tool results persisted, and how is the preview built? | `utils/toolResultStorage.ts` |
+| 3 | How does the per-message budget avoid breaking the prompt cache? | `utils/toolResultStorage.ts`, `services/api/promptCacheBreakDetection.ts` |
+| 4 | How does the agent event tracking system record and expose events? | `services/agentTracker.ts`, `server/dashboard.ts` |
+
+### Metrics
+
+| Metric | Measurement | Kind |
+|---|---|---|
+| Wall-clock | end-to-end time for the sweep | speed |
+| Main-agent context after | tokens in the main session post-sweep | context |
+| Subsequent TTFT | median time-to-first-token over the next 10 turns | speed |
+| **File recall** | `|cited ∩ truth| / |truth|` | quality |
+| **File precision** | `|cited ∩ truth| / |cited|` | quality |
+| **Citation validity** | cited file exists and line range is in bounds | quality, mechanical |
+| **Quote fidelity** | verbatim block matches the file's actual bytes at those lines | quality, mechanical |
+| Answer sufficiency | fixed rubric scored by an LLM judge | quality, noisy |
+| Cost | tokens × model price | cost |
+
+**Quote fidelity is the most valuable metric here.** Because the explorer contract
+requires verbatim code under `file:line` headers, every quoted block can be checked
+against the file on disk byte-for-byte. A mismatch is a hallucination, caught
+mechanically with no judge and no ambiguity. Any non-zero hallucination rate is a
+release blocker — a confidently wrong citation is worse than no citation, because
+the main agent will trust it and skip verifying.
+
+Recall and precision together guard against the two failure modes named under
+"Known limitations": partition blindness shows up as low recall, over-eager
+exploration as low precision.
+
+### Method
+
+- N = 5 runs per question per arm; report **median and spread**, never a single run.
+  LLM latency and output both vary enough that a single sample is meaningless.
+- Report per-arm cost so a quality win bought with a large cost increase is visible
+  rather than hidden.
+- Results are written to `bench/results/<date>.json` and a summary table to stdout,
+  so runs are comparable across commits.
+- Gate on wide margins. The suite exists to catch regressions, not jitter.
 
 ## Publishing
 
