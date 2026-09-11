@@ -3,9 +3,17 @@ dist/
 # bench/results/*.json IS tracked — every number in README.md and the design spec
 # has to resolve to a file someone who clones this can open. What is not tracked is
 # the verbatim report text those runs produced: it embeds ~1 MB of source from the
-# benchmark corpus, which is a private third-party repository. `bench/run.ts` writes
-# reports into the artifact; they are stripped before commit and the untouched
-# originals stay here.
+# benchmark corpus, which is a private third-party repository.
+#
+# That separation is enforced by `bench/run.ts`, not by hand. The sweep writes the
+# untouched reports HERE first, then strips them from the artifact it writes to
+# bench/results/ and scans the serialised result for leaked report text before
+# writing it; a leak aborts the write rather than producing a file that looks
+# committable. `npm run bench -- --verify-artifacts` re-checks every file already
+# in bench/results/ and is worth running before any `git add` of that directory.
+#
+# This line is the last defence, not the first. Do not remove it, and do not force
+# anything under it into a commit.
 bench/results/raw-reports/
 *.log
 .claude-flow/
