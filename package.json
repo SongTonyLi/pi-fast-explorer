@@ -10,6 +10,7 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.json",
 		"test": "vitest --run",
+		"typecheck:tests": "tsc -p tsconfig.test.json",
 		"bench": "node --experimental-strip-types bench/run.ts"
 	},
 	"peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.85.0" },

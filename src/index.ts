@@ -1,8 +1,12 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	CONFIG_DIR_NAME,
+	type ExtensionAPI,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type PartialConfig, resolveConfig } from "./config.js";
+import { type PartialConfig, loadConfigFrom, resolveConfig } from "./config.js";
 import { type ExplorerResult, buildExplorerArgs, runExplorer, runWithConcurrency } from "./explorer.js";
 import { synthesize } from "./synthesis.js";
 
@@ -22,6 +26,9 @@ export interface ExploreDetails {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROMPT_PATH = join(HERE, "..", "prompts", "explorer.md");
 
+/** Basename of both the user-level and project-level config files. */
+export const CONFIG_FILE_NAME = "fast-explorer.json";
+
 /**
  * Caller-supplied `questions` remove a blocking planner round-trip from the
  * critical path: the main agent is already reasoning when it calls explore, so
@@ -34,7 +41,25 @@ export function buildBriefs(input: ExploreInput, maxFanout: number): string[] {
 }
 
 export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
-	const cfg = resolveConfig(userConfig);
+	// Mutable because config is reloaded on every session_start. `execute` reads
+	// this binding at call time, so a reload takes effect without re-registering.
+	let cfg = resolveConfig(userConfig);
+
+	// pi's loader calls the factory with only `pi`, so `userConfig` is populated
+	// exclusively by a wrapper extension. Disk is the path real users have.
+	pi.on("session_start", (_event, ctx) => {
+		const { config, error } = loadConfigFrom(
+			join(getAgentDir(), CONFIG_FILE_NAME),
+			join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME),
+			ctx.isProjectTrusted(),
+			userConfig,
+			cfg,
+		);
+		cfg = config;
+		if (error) {
+			ctx.ui.notify(`fast-explorer: ignoring invalid config — ${error}`, "warning");
+		}
+	});
 
 	pi.registerTool({
 		name: "explore",
