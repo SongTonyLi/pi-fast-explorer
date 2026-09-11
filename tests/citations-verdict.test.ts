@@ -96,6 +96,48 @@ writeFileSync(
 /** A file that shares nothing with `right.ts`. */
 writeFileSync(join(dir, "elsewhere.ts"), ["export const nothingAlike = true", ""].join("\n"));
 
+/**
+ * Short lines, built to sit either side of both triviality floors.
+ *
+ * Lengths are exact and load-bearing, so they are spelled out here rather than
+ * left to be counted off the page:
+ *
+ *   const x = 1;               12 chars, occurs once  — genuine evidence
+ *   let ab;                     7 chars, occurs once  — under the floor
+ *   let abc;                    8 chars, occurs once  — on the floor
+ *   retry(attempts, optsX);    23 chars, occurs twice — under MIN_DISTINCT_CHARS
+ *   retry(attempts, optsXY);   24 chars, occurs twice — on MIN_DISTINCT_CHARS
+ *   if (ready) {               12 chars, occurs twice — the `.optional()` shape
+ *   }                           1 char,  occurs four times
+ *
+ * The nested function at the end exists only so that two `}` lines sit next to
+ * each other, which is what a multi-line trivial quote needs to match against.
+ */
+writeFileSync(
+	join(dir, "short.ts"),
+	[
+		"const x = 1;",
+		"let ab;",
+		"let abc;",
+		"retry(attempts, optsX);",
+		"retry(attempts, optsXY);",
+		"if (ready) {",
+		"  work();",
+		"}",
+		"retry(attempts, optsX);",
+		"retry(attempts, optsXY);",
+		"if (ready) {",
+		"  work();",
+		"}",
+		"function nest() {",
+		"  if (done) {",
+		"    settle();",
+		"  }",
+		"}",
+		"",
+	].join("\n"),
+);
+
 function verdictOf(file: string, startLine: number, code: string, searchFiles?: string[]): QuoteVerdict {
 	return verifyQuote({ file, startLine, code }, dir, { searchFiles }).verdict;
 }
@@ -358,6 +400,109 @@ describe("verdict: misattributed", () => {
 	});
 });
 
+/**
+ * The hole this verdict closes: the exact-match path had no floor under it, so
+ * a quote of `}` verified as `exact` on the strength of the file containing a
+ * brace. Nothing was invented and nothing was demonstrated, and scoring it as a
+ * pass inflated fidelity with matches that carry no information.
+ *
+ * The pairs below are the whole rule. Each floor gets the case just under it
+ * and the case just over it, because a threshold nobody can see moving is a
+ * threshold that moves.
+ */
+describe("verdict: trivial", () => {
+	it("REFUSES to call a lone `}` exact, though the file does contain one", () => {
+		// The hole, stated directly. `elide.ts` has exactly ONE `}`, so this quote
+		// even pins down a unique location — and it is still not evidence. That is
+		// why the shortest floor is unconditional and not a distinctiveness test:
+		// 7.7% of the reference corpus's files contain exactly one `}`.
+		const r = verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir);
+		expect(r.verdict).toBe("trivial");
+		expect(r.valid).toBe(false);
+		expect(r.checkable).toBe(false);
+		expect(r.reason).toMatch(/trivial/i);
+	});
+
+	it("REFUSES a lone comment marker", () => {
+		expect(verdictOf("doc.ts", 3, "/**")).toBe("trivial");
+		expect(verdictOf("doc.ts", 7, "*/")).toBe("trivial");
+	});
+
+	it("does NOT call a genuine short quote trivial", () => {
+		// Twelve characters, one place in the file. Shorter than several of the
+		// fragments refused above and evidence where they are not, which is the
+		// whole reason the rule is not a plain character floor.
+		const r = verifyQuote({ file: "short.ts", startLine: 1, code: "const x = 1;" }, dir);
+		expect(r.verdict).toBe("exact");
+		expect(r.valid).toBe(true);
+		expect(r.checkable).toBe(true);
+	});
+
+	it("holds the floor at 8 characters: 7 is trivial, 8 is not", () => {
+		// Both occur exactly once. The only difference between them is one
+		// character, and that is deliberate — pinning the pair keeps the floor from
+		// being moved without a test going red.
+		expect(verdictOf("short.ts", 2, "let ab;")).toBe("trivial");
+		expect(verdictOf("short.ts", 3, "let abc;")).toBe("exact");
+	});
+
+	it("counts characters over the whole quote, not per line", () => {
+		// The two adjacent braces closing `nest()`. Two lines, two characters, and
+		// the floor is a property of the quote rather than of any line in it — a
+		// report cannot get past it by spreading punctuation over more lines.
+		expect(verdictOf("short.ts", 17, "}\n}")).toBe("trivial");
+	});
+
+	it("calls a short fragment the file repeats trivial, though it matched", () => {
+		// 12 characters, twice in the file — the `.optional()` / `} else {` shape.
+		// Identical in length to `const x = 1;` above and opposite in verdict,
+		// which is distinctiveness doing the work length cannot.
+		const r = verifyQuote({ file: "short.ts", startLine: 6, code: "if (ready) {" }, dir);
+		expect(r.verdict).toBe("trivial");
+		expect(r.reason).toMatch(/occurs 2 times/);
+	});
+
+	it("holds the second floor at 24 characters: 23 repeated is trivial, 24 is not", () => {
+		// Both occur twice. Past MIN_DISTINCT_CHARS, content is evidence whatever
+		// else is true of it — real code that happens to repeat is still real code.
+		expect(verdictOf("short.ts", 4, "retry(attempts, optsX);")).toBe("trivial");
+		expect(verdictOf("short.ts", 5, "retry(attempts, optsXY);")).toBe("exact");
+	});
+
+	it("lets a brace count once it is quoted with enough real code", () => {
+		// The brace is not the problem; a quote made only of braces is. Twenty-four
+		// characters across the two lines, so the length test settles it without
+		// ever asking how many places it matched.
+		expect(verdictOf("short.ts", 8, "}\nretry(attempts, optsX);")).toBe("exact");
+	});
+
+	it("NEVER launders a short invention into trivial", () => {
+		// The guard that matters most. Triviality is reachable only from a match
+		// that succeeded, so content absent from the file falls through to
+		// `fabricated` no matter how slight it is. Relabelling an invention
+		// "unverifiable" would be strictly worse than crediting a brace: it would
+		// move a real failure out of the gate.
+		expect(verdictOf("short.ts", 1, "%%")).toBe("fabricated");
+		expect(verdictOf("short.ts", 1, "nope;")).toBe("fabricated");
+		expect(verdictOf("short.ts", 1, "retry(attempts, zz);")).toBe("fabricated");
+		expect(verdictOf("elide.ts", 1, "]")).toBe("fabricated");
+	});
+
+	it("NEVER launders a misattribution into trivial", () => {
+		// `elsewhere.ts` has no brace and `right.ts` does. The quote is still an
+		// accusation about the wrong file, and triviality does not get to excuse it.
+		expect(verdictOf("elsewhere.ts", 4, "}", ["elsewhere.ts", "right.ts"])).toBe("misattributed");
+	});
+
+	it("never applies to the verdicts that already carry their own floors", () => {
+		// Truncation needs 24 matched characters and reflow needs 40, both at or
+		// above MIN_DISTINCT_CHARS, so nothing reaching them can be trivial. Pinned
+		// so that lowering one of those floors cannot silently open a path here.
+		expect(verdictOf("clip.ts", 1, [...CLIPPED_HEAD, "// cleanly."].join("\n"))).toBe("truncated");
+		expect(verdictOf("clip.ts", 1, [...CLIPPED_HEAD, "// cle"].join("\n"))).toBe("reflowed");
+	});
+});
+
 describe("verdict: fabricated, missing-file and empty", () => {
 	it("reports invention as fabricated", () => {
 		const r = verifyQuote({ file: "elide.ts", startLine: 1, code: "export const neverWritten = 1" }, dir);
@@ -400,6 +545,9 @@ describe("what `valid` means", () => {
 		["fabricated", false],
 		["missing-file", false],
 		["empty", false],
+		// Not valid — nothing was verified. Also not a failure: see `checkable`
+		// below, which is what keeps it out of the gate.
+		["trivial", false],
 	];
 
 	const produce: Record<QuoteVerdict, () => boolean> = {
@@ -428,6 +576,7 @@ describe("what `valid` means", () => {
 		fabricated: () => verifyQuote({ file: "elide.ts", startLine: 1, code: "export const neverWritten = 1" }, dir).valid,
 		"missing-file": () => verifyQuote({ file: "nope.ts", startLine: 1, code: "anything" }, dir).valid,
 		empty: () => verifyQuote({ file: "elide.ts", startLine: 1, code: " " }, dir).valid,
+		trivial: () => verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir).valid,
 	};
 
 	for (const [verdict, valid] of cases) {
@@ -435,4 +584,52 @@ describe("what `valid` means", () => {
 			expect(produce[verdict]()).toBe(valid);
 		});
 	}
+});
+
+/**
+ * `valid` answers two of the three things a quote can be. `checkable` is the
+ * third: whether there was anything here to answer about.
+ *
+ * Fidelity is `valid / checkable` and the gate is `!valid && checkable`, so a
+ * verdict that got `checkable` wrong in either direction corrupts the number
+ * silently — as a pass it inflates fidelity with vacuous matches, as a failure
+ * it blocks a release over a model quoting a brace. Every verdict is listed,
+ * not just the interesting one, so adding a verdict without deciding this is a
+ * compile error rather than a wrong number.
+ */
+describe("what `checkable` means", () => {
+	const checkable: Record<QuoteVerdict, boolean> = {
+		exact: true,
+		drifted: true,
+		truncated: true,
+		elided: true,
+		reflowed: true,
+		misattributed: true,
+		fabricated: true,
+		"missing-file": true,
+		empty: true,
+		trivial: false,
+	};
+
+	it("counts everything but trivial", () => {
+		expect(verifyQuote({ file: "elide.ts", startLine: 1, code: "export type Entry = {" }, dir).checkable).toBe(
+			checkable.exact,
+		);
+		expect(verifyQuote({ file: "elide.ts", startLine: 1, code: "export const neverWritten = 1" }, dir).checkable).toBe(
+			checkable.fabricated,
+		);
+		expect(verifyQuote({ file: "nope.ts", startLine: 1, code: "anything" }, dir).checkable).toBe(
+			checkable["missing-file"],
+		);
+		expect(verifyQuote({ file: "elide.ts", startLine: 1, code: " " }, dir).checkable).toBe(checkable.empty);
+		expect(verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir).checkable).toBe(checkable.trivial);
+	});
+
+	it("keeps a trivial quote out of both sides of the ratio", () => {
+		const r = verifyQuote({ file: "elide.ts", startLine: 6, code: "}" }, dir);
+		// Not counted as verified...
+		expect(r.valid).toBe(false);
+		// ...and not counted at all, so `!valid && checkable` — the gate — is false.
+		expect(!r.valid && r.checkable).toBe(false);
+	});
 });

@@ -51,7 +51,7 @@ const HEADER = /^(\s*(?:\/\/|#)\s*)([^\s:]+):(\d+)\s*$/;
  * Every keyword the marker can open with is listed here, so adding a verdict
  * without extending this alternation is the exact regression described above.
  */
-const VERDICT_MARKER = / — (?:UNVERIFIED|PARTIAL|MISATTRIBUTED):[^\n]*$/;
+const VERDICT_MARKER = / — (?:UNVERIFIED|PARTIAL|MISATTRIBUTED|UNCHECKED):[^\n]*$/;
 
 function parseHeader(line: string | undefined): RegExpExecArray | null {
 	return HEADER.exec((line ?? "").replace(VERDICT_MARKER, ""));
@@ -161,6 +161,10 @@ export function extractQuotes(report: string): Quote[] {
  *  - fabricated     found nowhere. The model wrote it
  *  - missing-file   the cited path does not exist
  *  - empty          a header with no code under it; malformed, not verified
+ *  - trivial        the content matched, and matching it proved nothing: a
+ *                   closing brace, a comment marker, a fragment that occurs all
+ *                   over the file. Not a pass and not a failure — see
+ *                   `VerifyResult.checkable`
  */
 export type QuoteVerdict =
 	| "exact"
@@ -171,7 +175,8 @@ export type QuoteVerdict =
 	| "misattributed"
 	| "fabricated"
 	| "missing-file"
-	| "empty";
+	| "empty"
+	| "trivial";
 
 /**
  * Verdicts under which every character the caller can read is real content of
@@ -180,8 +185,11 @@ export type QuoteVerdict =
  * and reflow join drift on the true side: they are incomplete quotes of real
  * code, and the caller reasoning from the text it can see is reasoning from the
  * file. Misattribution and fabrication are false because in both the cited file
- * does not contain what the report says it contains. Keeping the boundary there
- * means `!valid` IS the release gate, with nothing further to subtract.
+ * does not contain what the report says it contains.
+ *
+ * `!valid` was once the whole release gate, with nothing to subtract. It is now
+ * `!valid && checkable`, because exactly one verdict — `trivial` — is a refusal
+ * to judge rather than a judgement. See `VerifyResult.checkable`.
  */
 const CONTENT_IS_REAL: ReadonlySet<QuoteVerdict> = new Set<QuoteVerdict>([
 	"exact",
@@ -203,6 +211,29 @@ export interface CitationResult {
 
 export interface VerifyResult extends CitationResult {
 	verdict: QuoteVerdict;
+	/**
+	 * Whether this quote belongs in a fidelity ratio at all — true for every
+	 * verdict but `trivial`.
+	 *
+	 * `valid` is a two-valued answer to a question that has three answers. A
+	 * quote of `}` is not verified: the brace is in the file, but so is every
+	 * other brace, and nothing about the report was confirmed by finding one. It
+	 * is equally not fabricated: the model invented nothing. Scoring it either
+	 * way corrupts the number. As `valid` it is a vacuous match inflating
+	 * fidelity — the same defect as a gate that reads 100% because nothing
+	 * parsed. As `!valid` it fires the release gate over a non-problem, and a
+	 * gate that fires on non-problems is one people learn to override.
+	 *
+	 * So a trivial quote is dropped from BOTH sides of the ratio. Fidelity is
+	 * `valid / checkable`, the gate is `!valid && checkable`, and the count of
+	 * unchecked quotes is reported on its own — see `ReanchorResult.trivial` —
+	 * because a report made of braces should look empty rather than perfect.
+	 *
+	 * A field rather than a rule to remember: every consumer that destructures a
+	 * result sees it, and TypeScript makes it impossible to build a result here
+	 * without deciding.
+	 */
+	checkable: boolean;
 	/**
 	 * Line where the quoted content actually starts, when found. 1-based, and in
 	 * `actualFile` whenever that is set rather than in the file the quote named.
@@ -353,6 +384,117 @@ function locateQuote(needle: string[], haystack: AnchoredLine[], statedLine: num
 		if (first === null) first = line;
 	}
 	return first;
+}
+
+/**
+ * Matched content short enough that it may not be evidence, and why.
+ *
+ *  - short   under the floor no content clears, however well it matched
+ *  - common  over that floor but under MIN_DISTINCT_CHARS, and matching in more
+ *            than one place, so it identifies nothing
+ */
+type Triviality =
+	| { kind: "short"; chars: number }
+	| { kind: "common"; chars: number; occurrences: number };
+
+/**
+ * Shortest matched content that can be evidence of anything on its own.
+ *
+ * The same eight as MIN_PREFIX_CHARS, for the same reason and from the same
+ * measurement, but kept as its own constant: these are two independent
+ * decisions that happen to coincide, and sharing one name would mean moving the
+ * prefix rule silently moved this one.
+ *
+ * Set from the corpus. Taking every distinct line of the 2,096 reference files
+ * and asking which ones are the ONLY copy of themselves in their own file, the
+ * unique lines under eight characters are — in descending order of how many
+ * files they appear in — `*/`, `/**`, `const {`, `} = t0;`, `let t2;`, `*`,
+ * `try {`, `})`, `) {`, `if (`, `return`, `}`. Not one of them is evidence of
+ * anything, and their uniqueness is an accident of file size rather than a
+ * property of the content. That is why this floor is unconditional while the
+ * one below is not: under eight characters, distinctiveness is measuring the
+ * file, not the quote.
+ *
+ * It has to be unconditional. `}` is a whole line 44,543 times across the
+ * corpus, a mean of 25 times in each of the 1,764 files that contain one — but
+ * in 135 of those files (7.7%) it occurs exactly once. A rule that asked only
+ * "does this pin down one place?" would hand a clean `exact` to a quote of `}`
+ * in one file in thirteen.
+ */
+const MIN_EVIDENCE_CHARS = 8;
+
+/**
+ * Above this many matched characters, content is evidence whatever else is true
+ * of it; below it, content must also pin down one place in the file.
+ *
+ * This is the number that keeps the rule from being a blunt length floor.
+ * `const x = 1;` is twelve characters and is real evidence; `.optional()` is
+ * eleven and is not. Length cannot separate them and repetition can: across the
+ * corpus's 8-to-23-character lines, 77,383 distinct ones occur exactly once in
+ * their file and 7,657 repeat, and the repeating ones are `} else {` (5,244
+ * occurrences), `return {` (2,278), `logForDebugging(` (1,531), `import {`
+ * (1,011), `return false` (768), `.optional()` (297), `throw new Error(` (177).
+ * Those are the shape a model reaches for when it has nothing to show. Quoting
+ * one of them is not a claim a reader can check.
+ *
+ * It is set at the number MIN_MATCHED_CHARS already uses, which is where this
+ * codebase previously decided a fragment starts carrying enough to be worth
+ * crediting, and the agreement is deliberate: a fragment too thin to excuse a
+ * truncation is too thin to stand as evidence unaided.
+ *
+ * The corpus says this must be a gate on the scan and not a verdict on its own.
+ * Of the 1,265 quotes in the stored reports, exactly three fall below it, and
+ * all three are real evidence a reader would want:
+ *
+ *   // GET /api/sessions              20 chars, once in src/server/dashboard.ts
+ *   // GET /api/events/sse            22 chars, once in src/server/dashboard.ts
+ *   clearedToolResults, / }           20 chars, once in microCompact.ts
+ *
+ * A blunt 24-character floor would have called all three trivial. Each occurs
+ * exactly once in its file, so the occurrence test spares all three, and the
+ * measured misclassification of this rule on the corpus is zero. That is the
+ * whole reason the second clause is a conjunction rather than a length cutoff.
+ */
+const MIN_DISTINCT_CHARS = 24;
+
+/** How many places in the file the needle matches. */
+function countOccurrences(needle: readonly string[], haystack: readonly AnchoredLine[]): number {
+	let found = 0;
+	for (let i = 0; i + needle.length <= haystack.length; i++) {
+		let matched = true;
+		for (let j = 0; j < needle.length; j++) {
+			if (haystack[i + j]!.text !== needle[j]) {
+				matched = false;
+				break;
+			}
+		}
+		if (matched) found++;
+	}
+	return found;
+}
+
+/**
+ * Why a quote that DID match is nonetheless not evidence, or null if it is.
+ *
+ * Only ever consulted on a successful verbatim match — see `verifyQuoteWith`.
+ *
+ * The length test runs first and costs nothing, which is what bounds the cost of
+ * the occurrence scan: it runs only for content under MIN_DISTINCT_CHARS, and
+ * that is 3 of the 1,265 quotes in the stored reports. Scanning every quote
+ * instead — the distinctiveness-first design — measures at 4.1us per quote, so
+ * the saving is real but small; what the gate mostly buys is not having to give
+ * up `locateQuote`'s early return on the stated line for every quote in every
+ * report to decide something a length comparison already settled. End to end,
+ * `reanchorReport` over the 140 stored reports is 0.65ms per report with this
+ * rule and 0.65ms without it.
+ */
+function triviality(needle: readonly string[], haystack: readonly AnchoredLine[]): Triviality | null {
+	let chars = 0;
+	for (const line of needle) chars += line.length;
+	if (chars >= MIN_DISTINCT_CHARS) return null;
+	if (chars < MIN_EVIDENCE_CHARS) return { kind: "short", chars };
+	const occurrences = countOccurrences(needle, haystack);
+	return occurrences > 1 ? { kind: "common", chars, occurrences } : null;
 }
 
 /**
@@ -589,7 +731,12 @@ function verifyQuoteWith(
 ): VerifyResult {
 	const lines = read(q.file);
 	if (!lines) {
-		return { valid: false, verdict: "missing-file", reason: `file not found: ${q.file}` };
+		return {
+			valid: false,
+			checkable: true,
+			verdict: "missing-file",
+			reason: `file not found: ${q.file}`,
+		};
 	}
 
 	const quoted = normalizeQuote(q.code);
@@ -597,6 +744,7 @@ function verifyQuoteWith(
 	if (quoted.length === 0) {
 		return {
 			valid: false,
+			checkable: true,
 			verdict: "empty",
 			reason: `empty quote for ${q.file}:${q.startLine}`,
 		};
@@ -605,6 +753,7 @@ function verifyQuoteWith(
 	const haystack = anchoredLines(lines);
 	const found = (verdict: QuoteVerdict, actualLine: number, reason?: string): VerifyResult => ({
 		valid: CONTENT_IS_REAL.has(verdict),
+		checkable: true,
 		verdict,
 		actualLine,
 		drift: actualLine - q.startLine,
@@ -612,7 +761,36 @@ function verifyQuoteWith(
 	});
 
 	const exact = locateQuote(quoted, haystack, q.startLine);
-	if (exact !== null) return found(exact === q.startLine ? "exact" : "drifted", exact);
+	if (exact !== null) {
+		// Triviality is a demotion of a match that SUCCEEDED, and it is reachable
+		// from nowhere else in this function. That placement is the whole safety
+		// argument: `trivial` can only ever be returned instead of `exact` or
+		// `drifted`, so no quote that would have been called fabricated,
+		// misattributed or missing-file can be relabelled unjudged by it. A short
+		// invented line still appears nowhere in the file, still falls through
+		// every rule below, and still comes back `fabricated` — laundering an
+		// invention into "unverifiable" would be strictly worse than crediting a
+		// brace, and the only way to be sure it cannot happen is for the failure
+		// paths never to consult this rule at all.
+		//
+		// The weaker verdicts below need no such test and get none: truncation and
+		// elision already require MIN_MATCHED_CHARS (24) of matched text and
+		// reflow MIN_PROSE_CHARS (40), every one of which is at or above
+		// MIN_DISTINCT_CHARS, so no quote reaching them could be trivial anyway.
+		const why = triviality(quoted, haystack);
+		if (why !== null) {
+			return {
+				valid: false,
+				checkable: false,
+				verdict: "trivial",
+				reason:
+					why.kind === "short"
+						? `trivial: ${why.chars} character${why.chars === 1 ? "" : "s"} of content is not evidence about ${q.file}, so this is neither verified nor fabricated`
+						: `trivial: this content occurs ${why.occurrences} times in ${q.file}, so quoting it identifies nothing; neither verified nor fabricated`,
+			};
+		}
+		return found(exact === q.startLine ? "exact" : "drifted", exact);
+	}
 
 	const truncated = locateTruncated(quoted, haystack, q.startLine);
 	if (truncated !== null) {
@@ -658,6 +836,7 @@ function verifyQuoteWith(
 		if (at === null) continue;
 		return {
 			valid: false,
+			checkable: true,
 			verdict: "misattributed",
 			actualFile: candidate,
 			actualLine: at,
@@ -667,6 +846,7 @@ function verifyQuoteWith(
 
 	return {
 		valid: false,
+		checkable: true,
 		verdict: "fabricated",
 		reason: `fabricated: quoted code appears nowhere in ${q.file} (header said line ${q.startLine})`,
 	};
@@ -700,6 +880,17 @@ export interface ReanchorResult {
 	misattributed: number;
 	/** Blocks marked PARTIAL: clipped, elided or re-wrapped. Real, incomplete. */
 	partial: number;
+	/**
+	 * Blocks whose quoted content was too slight to check either way — a brace, a
+	 * comment marker, a fragment the file repeats.
+	 *
+	 * Reported on its own and counted in neither `fabricated` nor the verified
+	 * total, because it is neither. The number exists so a report made of
+	 * punctuation reads as empty instead of perfect: eleven blocks of which nine
+	 * are trivial is a bad report, and every ratio that hides this count makes it
+	 * look like a good one.
+	 */
+	trivial: number;
 }
 
 /**
@@ -719,6 +910,16 @@ const UNVERIFIED_NO_FILE = " — UNVERIFIED: file not found";
 const PARTIAL_TRUNCATED = " — PARTIAL: lines clipped; the text shown is verbatim";
 const PARTIAL_ELIDED = " — PARTIAL: lines omitted; the text shown is verbatim";
 const PARTIAL_REFLOWED = " — PARTIAL: comment re-wrapped; the wording is verbatim";
+/**
+ * Its own keyword, not a fourth flavour of UNVERIFIED.
+ *
+ * UNVERIFIED tells the caller the block may be fiction. This block is not
+ * fiction and is not fact either — the verifier looked and there was nothing in
+ * it to look at. Saying UNVERIFIED would send a reader to re-derive a closing
+ * brace; saying nothing would let the reader assume the block was checked, which
+ * is the one thing that must not happen to an unchecked block.
+ */
+const UNCHECKED_TRIVIAL = " — UNCHECKED: content too slight to verify either way";
 
 /**
  * The note for a verdict, or null when the block needs no note.
@@ -742,6 +943,8 @@ function verdictMarker(result: VerifyResult): string | null {
 			return PARTIAL_ELIDED;
 		case "reflowed":
 			return PARTIAL_REFLOWED;
+		case "trivial":
+			return UNCHECKED_TRIVIAL;
 		case "misattributed":
 			return ` — MISATTRIBUTED: this code is in ${result.actualFile}:${result.actualLine}, not here`;
 		case "missing-file":
@@ -845,6 +1048,7 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 	let fabricated = 0;
 	let misattributed = 0;
 	let partial = 0;
+	let trivial = 0;
 	let out = "";
 	let cursor = 0;
 
@@ -869,9 +1073,17 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 			// names. Misattribution has a real line number attached and it belongs
 			// to another file, so feeding it to the citation rewriter would move a
 			// `Files Retrieved` range onto a line of a file nobody verified.
+			//
+			// `trivial` abstains entirely, as `empty` does, rather than poisoning the
+			// entry. A brace matches in eighty places, so the line it "found" is not a
+			// location and must never move a range; equally it is not a contradiction,
+			// so it has no business overruling a real quote that states the same
+			// anchor. Silence is the only honest thing an unchecked block can say
+			// about a citation entry.
 			const anchored = CONTENT_IS_REAL.has(result.verdict) ? result.actualLine : undefined;
+			const abstains = result.verdict === "empty" || result.verdict === "trivial";
 			if (anchored !== undefined) recordAnchor(verified, key, anchored);
-			else if (result.verdict !== "empty") recordAnchor(verified, key, null);
+			else if (!abstains) recordAnchor(verified, key, null);
 
 			let header = bodyLines[headerIndex]!.replace(VERDICT_MARKER, "").replace(/\s+$/, "");
 			if (anchored !== undefined && result.drift !== 0) {
@@ -897,6 +1109,9 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 				case "reflowed":
 					partial++;
 					break;
+				case "trivial":
+					trivial++;
+					break;
 				case "exact":
 				case "drifted":
 				case "empty":
@@ -921,5 +1136,6 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 		fabricated,
 		misattributed,
 		partial,
+		trivial,
 	};
 }

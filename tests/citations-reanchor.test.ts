@@ -12,7 +12,13 @@ writeFileSync(
 	join(dir, "src", "session.ts"),
 	'import { now } from "./clock.js";\n\nconst REFRESH = 900;\nif (now() - issued >= REFRESH) {}\nexport const done = true;\n',
 );
-writeFileSync(join(dir, "src", "dup.ts"), "aaa\nbbb\nccc\n");
+// Three distinct lines, each long enough to count as evidence on its own — a
+// quote has to clear the triviality floor before it can pin an anchor, and this
+// fixture exists to test anchor precedence, not that floor.
+writeFileSync(
+	join(dir, "src", "dup.ts"),
+	"const aaa = firstThing();\nconst bbb = secondThing();\nconst ccc = thirdThing();\n",
+);
 
 /** Written out rather than inlined so the fences below stay readable. */
 const F = "```";
@@ -116,12 +122,12 @@ describe("reanchorReport", () => {
 			"",
 			`${F}text`,
 			"// src/dup.ts:1",
-			"bbb",
+			"const bbb = secondThing();",
 			F,
 			"",
 			`${F}text`,
 			"// src/dup.ts:1",
-			"ccc",
+			"const ccc = thirdThing();",
 			F,
 			"",
 		].join("\n");
@@ -374,6 +380,75 @@ describe("reanchorReport marks blocks by verdict", () => {
 		expect(out.report).toContain("// src/budget.ts:3 — PARTIAL: lines omitted");
 		expect(out.corrected).toBe(1);
 		expect(out.partial).toBe(1);
+	});
+
+	it("marks a trivial block UNCHECKED rather than leaving it bare", () => {
+		// A bare block is one a reader assumes was checked. This one was not, in
+		// either direction, and that is the fact the marker carries.
+		const brace = [
+			"## Files Retrieved",
+			"1. `src/budget.ts` (lines 1-7) - the budget",
+			"",
+			`${F}ts`,
+			"// src/budget.ts:7",
+			"}",
+			F,
+			"",
+		].join("\n");
+		const out = reanchorReport(brace, dir2);
+		expect(out.report).toContain("// src/budget.ts:7 — UNCHECKED: content too slight to verify either way");
+		// Neither a failure nor a pass: counted on its own line and nowhere else.
+		expect(out.trivial).toBe(1);
+		expect(out.fabricated).toBe(0);
+		expect(out.misattributed).toBe(0);
+		expect(out.partial).toBe(0);
+		// And the anchor is not "corrected" onto the first brace in the file, which
+		// would be inventing a location out of a match that located nothing.
+		expect(out.corrected).toBe(0);
+		expect(out.report).toContain("1. `src/budget.ts` (lines 1-7) - the budget");
+	});
+
+	it("keeps an UNCHECKED block visible to the quote extractor", () => {
+		// The exact regression a previous fix shipped: a marker that defeats the
+		// header regex deletes the block from the verifier's denominator, so
+		// annotating a failure RAISES the fidelity score. UNCHECKED is a new keyword
+		// and had to be added to the marker alternation like every other one.
+		const brace = `${F}ts\n// src/budget.ts:7\n}\n${F}\n`;
+		const out = reanchorReport(brace, dir2);
+		const quotes = extractQuotes(out.report);
+		expect(quotes).toHaveLength(1);
+		expect(`${quotes[0]!.file}:${quotes[0]!.startLine}`).toBe("src/budget.ts:7");
+		expect(verifyQuote(quotes[0]!, dir2).verdict).toBe("trivial");
+		// Stable under a second pass, like every other marker.
+		const again = reanchorReport(out.report, dir2);
+		expect(again.report).toBe(out.report);
+		expect(again.trivial).toBe(1);
+	});
+
+	it("lets a real quote pin an anchor a trivial block also claims", () => {
+		// A trivial excerpt abstains rather than poisoning the entry: it is not a
+		// location, so it must not move a range, and it is not a contradiction, so
+		// it must not overrule the quote beside it that verified.
+		const mixed = [
+			"## Files Retrieved",
+			"1. `src/budget.ts` (lines 9-11) - the entry",
+			"",
+			`${F}ts`,
+			"// src/budget.ts:9",
+			"}",
+			F,
+			"",
+			`${F}ts`,
+			"// src/budget.ts:9",
+			"export type Entry = {",
+			"  kind: 'entry'",
+			F,
+			"",
+		].join("\n");
+		const out = reanchorReport(mixed, dir2);
+		expect(out.report).toContain("// src/budget.ts:3\nexport type Entry = {");
+		expect(out.report).toContain("1. `src/budget.ts` (lines 3-5) - the entry");
+		expect(out.trivial).toBe(1);
 	});
 
 	it("does not hunt for misattribution outside the files the report cites", () => {
