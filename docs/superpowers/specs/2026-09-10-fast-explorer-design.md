@@ -675,7 +675,7 @@ area of the repo:
 |---|---|---|
 | 1 | How does microcompaction decide which tool results to clear? | `services/compact/microCompact.ts`, `timeBasedMCConfig.ts` |
 | 2 | Where are large tool results persisted, and how is the preview built? | `utils/toolResultStorage.ts` |
-| 3 | How does the per-message budget avoid breaking the prompt cache? | `utils/toolResultStorage.ts`, `services/api/promptCacheBreakDetection.ts` |
+| 3 | How does the per-message budget avoid breaking the prompt cache? | `utils/toolResultStorage.ts` |
 | 4 | How does the agent event tracking system record and expose events? | `services/agentTracker.ts`, `server/dashboard.ts` |
 
 Question 5 was added on 2026-09-11, after the first sweep showed that all four of the
@@ -855,3 +855,20 @@ declares that field. The symlink must also target the package root rather than
 `prompts/explorer.md` relative to the loaded file, and a missing
 `--append-system-prompt` path is appended as literal text rather than raising —
 which would strip the output contract from every explorer with no error anywhere.
+
+### Amendment (2026-09-11): question 3 ground truth corrected
+
+The table above originally listed `services/api/promptCacheBreakDetection.ts` for
+question 3. It was matched on its name, not its contents: it contains zero
+occurrences of `budget` or `tool_result`, hashes system and tool state, and logs
+cache-break telemetry. Neither module imports the other. The budget and its
+cache-stability reasoning live entirely in `toolResultStorage.ts`.
+
+This mattered more than a stale row usually would. While that entry stood, the
+benchmark scored question 3 at recall 0.50 across five consecutive runs — the
+explorers had found everything that was actually there, every time, and were being
+penalised for not citing a file with nothing relevant in it. A benchmark that marks
+correct answers wrong is worse than no benchmark, because the obvious response is to
+"fix" the tool until it chases the error.
+
+`bench/questions.ts` was corrected first; this table had drifted from it.
