@@ -49,12 +49,15 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	 * works; this number is the outer edge, set above the observed overrun rather
 	 * than through it.
 	 *
-	 * That original argument has since been retired at its source — `bench/run.ts`
-	 * now reports overruns in their own column instead of folding them into `ok` —
+	 * That original argument has since been retired at its source — the benchmark
+	 * harness now reports overruns in their own column instead of folding them
+	 * into `ok` —
 	 * so 6 was tried on 2026-09-11 to see whether a tighter budget bought back
 	 * latency. It did not, and the number stayed at 8. Do not re-run that
-	 * experiment without reading `FINDINGS["turn-budget-not-a-latency-lever"]` in
-	 * bench/run.ts first. In short:
+	 * experiment without reading the summary below. It came from the harness's
+	 * `FINDINGS["turn-budget-not-a-latency-lever"]` block; the harness ran against
+	 * a private corpus and is not part of this repository, so this comment is the
+	 * only surviving copy. In short:
 	 *
 	 *  - Cap 6 (sweep 08-29-29) landed at an explorer-vs-baseline ratio of 1.35,
 	 *    against 1.34 for cap 8 (08-02-02) — no recovery at all.

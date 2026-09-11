@@ -391,12 +391,15 @@ export interface VerifyResult extends CitationResult {
  *
  * The number is `src/detect.ts`'s `MAX_VERIFY_FILE_BYTES`, which caps the
  * analogous read on the auto-promotion path for exactly this reason. The two are
- * deliberately equal and deliberately NOT shared through an import: `bench/` is
- * executed directly by `node --experimental-strip-types`, which cannot resolve
- * the `.js` specifiers `src/` compiles with, so it imports `src/citations.ts` as
- * a leaf and a value import of `./detect.js` here would break `npm run bench`
- * with ERR_MODULE_NOT_FOUND. `tests/citations-large-file.test.ts` asserts the
- * two constants are the same number so the duplication cannot drift.
+ * deliberately equal and deliberately NOT shared through an import. The reason is
+ * historical: the benchmark harness (not part of this repository — it ran against
+ * a private corpus) was executed directly by `node --experimental-strip-types`,
+ * which cannot resolve the `.js` specifiers `src/` compiles with, so it imported
+ * `src/citations.ts` as a leaf and a value import of `./detect.js` here would have
+ * failed with ERR_MODULE_NOT_FOUND. The constraint is gone with the harness; the
+ * duplication is kept because nothing needs it merged and the guard is cheap.
+ * `tests/citations-large-file.test.ts` asserts the two constants are the same
+ * number so the duplication cannot drift.
  */
 export const MAX_VERIFY_BYTES = 4 * 1024 * 1024;
 

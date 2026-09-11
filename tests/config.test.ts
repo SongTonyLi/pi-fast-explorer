@@ -16,8 +16,10 @@ describe("resolveConfig", () => {
 	// Lowering it again HAS been tried against fresh measurement: 6 was benchmarked
 	// on 2026-09-11 (sweep 08-29-29) and bought no latency back — ratio 1.35 at cap
 	// 6 against 1.34 at cap 8 — while leaving bash-approval's median recall at 0.80.
-	// Read FINDINGS["turn-budget-not-a-latency-lever"] in bench/run.ts before
-	// spending another sweep on it.
+	// The evidence lived in the harness's
+	// FINDINGS["turn-budget-not-a-latency-lever"] block. The harness ran against a
+	// private corpus and is not part of this repository, so the summary in
+	// src/config.ts is the surviving copy; read it before spending another sweep.
 	it("defaults the advisory turn budget to 8", () => {
 		expect(resolveConfig().maxTurnsPerExplorer).toBe(8);
 	});

@@ -48,10 +48,12 @@ function deliveredHeader(report: string): string {
 
 describe("the verification size cap", () => {
 	it("is the same number the auto-promotion path uses", () => {
-		// Two constants rather than one import, because `bench/run.ts` loads
-		// `src/citations.ts` directly under `node --experimental-strip-types`, which
-		// cannot resolve the `.js` specifier a value import of detect would need.
-		// This assertion is what stops the duplication drifting.
+		// Two constants rather than one import. Originally because the benchmark
+		// harness loaded `src/citations.ts` directly under
+		// `node --experimental-strip-types`, which cannot resolve the `.js` specifier
+		// a value import of detect would need. That harness is no longer part of this
+		// repository; the duplication stayed, and this assertion is what stops it
+		// drifting.
 		expect(MAX_VERIFY_BYTES).toBe(MAX_VERIFY_FILE_BYTES);
 		expect(MAX_VERIFY_BYTES).toBe(4 * 1024 * 1024);
 	});

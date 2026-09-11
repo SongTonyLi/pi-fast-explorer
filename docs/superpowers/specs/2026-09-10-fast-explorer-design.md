@@ -23,11 +23,21 @@ large enough to name here, and the first two went against the design:
   `/explore` slash command. The planner's absence was recorded under "Implementation
   notes" but never in the block itself; the slash command's was recorded nowhere. See
   "Amendment (2026-09-11): two components in this block were never built".
-- **Some figures in this document cannot be checked.** As of 2026-09-11 `bench/results/`
-  is committed, so every benchmark number here resolves to a file. Three sets of figures
-  do not, and are now labelled where they appear: the 49,985-mutation verifier sweep, the
-  one end-to-end auto-promotion run, and the fork-bomb branching factor. They were real
-  measurements; the artifacts were not kept.
+- **No figure in this document can be checked from this repository.** The benchmark
+  harness and its result artifacts are not published: every sweep ran against
+  `~/claude-plus-plus`, a private third-party repository, and both the harness and the
+  artifacts name or quote its source. The numbers are kept with the provenance they were
+  recorded under — each names the run that produced it and the field it was read from,
+  and the timestamps below (`2026-09-11T09-12-16` and the rest) are artifact filenames
+  used as run identifiers — but the files are not here and the sweeps cannot be re-run.
+  Read them as measurements taken in specific runs you have no access to.
+
+  Within that, one distinction still matters and is marked where it appears. Most figures
+  here were written into a result artifact that exists but is withheld. Three sets never
+  had an artifact at all — the 49,985-mutation verifier sweep, the one end-to-end
+  auto-promotion run, and the fork-bomb branching factor — because those were one-off
+  scripts and sessions that were not kept. A withheld artifact and a lost one are not the
+  same standard of evidence, and the second is weaker.
 
 ## Problem
 
@@ -141,6 +151,100 @@ This path matters more than Path A in practice, because the common failure is th
 model *not knowing* the sweep was coming.
 
 Threshold: more than 15 distinct files, or more than 60 total matches.
+
+#### Amendment (2026-09-11): `bash` is in the trigger set, and why detection is by output shape
+
+*(Moved here from `README.md`, which no longer carries design rationale at this depth.
+This section had described Path B as watching `grep` and `find` only.)*
+
+**Why `bash`.** A hook watching only the structured tools was measured missing the case
+it exists for. Asked *explicitly* to "use the grep tool" to search `src/`, a real session
+on pi's default toolbelt ran this instead:
+
+```json
+{"type":"tool_execution_end","toolName":"bash",
+ "args":{"command":"grep -RIn -- \"tool_use_id\" src/"}}
+```
+
+The same session restricted to `--tools read,grep,find,ls` promoted correctly, so the
+machinery was right and only the trigger was too narrow. `bash` ships in pi's default
+tool set, and models reach for it.
+
+**Detection is by output shape, not by command parsing.** Nothing in `src/` knows what
+`grep`, `rg`, `ag` or `git grep` are, and nothing tries to unpick pipes, flags or
+quoting; the end-to-end run that confirmed the path works was an `rg -n` invocation that
+no hand-written command parser here would have recognised. What the hook does instead is
+parse the output as `path:line:text` and then demand that the output describe *this
+repository*:
+
+- **Paths resolve.** At least 90% of the distinct parsed paths must exist as files on
+  disk. Real search output resolves at 1.00; a Node stack frame parses as
+  `    at a (/tmp/crash.js`, a vitest failure as ` ❯ x.test.ts`, a syslog line as
+  `2026-09-11 12`, and none of those resolve at all. The 10% of slack absorbs the ways a
+  genuine sweep loses a path — output the bash tool truncated mid-line, a file deleted
+  between the search and the hook — and allows exactly one bad path in the smallest
+  promotable sweep.
+- **The text is the file's line.** Up to 10 rows, strided across the match list, are read
+  back off disk and compared against the file's real content at the cited line. This is
+  the gate resolution cannot cover, and it is not hypothetical: compilers and linters
+  emit `path:line:col: message` about real files, so they pass a resolution check
+  outright, and mypy's default `path:line: error: …` parses to a real file at a real
+  line. What a diagnostic cannot do is carry the file's actual source text there, because
+  it is a message *about* the line. Search output round-trips exactly; 80% of the sample
+  must match.
+
+Both gates are mechanical properties of the output. Neither enumerates a tool, a command
+or a message format, so nothing rots when clang rewords a diagnostic or someone reaches
+for a grep clone this design has never heard of.
+
+The second gate is load-bearing, and the evidence for it is a real session rather than a
+fixture. Twenty C files, 80 KB, each with a warning on line 3, compiled with
+`-fno-show-column -fno-caret-diagnostics` so the output is exactly `path:line: message`,
+and `-Wno-error` so the command exits 0 and cannot be dismissed as a failed tool call. A
+real `gpt-5.6-luna` session ran it and the result was **not** promoted — the model got
+clang's 2,710 bytes back byte for byte. Every cheap gate had passed: 20 distinct paths,
+all 20 resolving, 80 KB of matched files. `verifyMatchedLines` returned
+`{ attempted: 10, verified: 0 }`, and that is the only reason the raw diagnostics
+survived. **That session was not recorded, so those five figures are an unreproducible
+measurement** — no artifact, no log, no fixture directory survives it, and unlike the
+benchmark figures there is no withheld file they could be checked against. What *is*
+checkable is the property it demonstrates: `tests/bash-promote.test.ts` runs the same
+shape against synthetic diagnostics with different numbers, and the thresholds named
+above are constants in `src/detect.ts`. Read the session as the anecdote that motivated
+the gate, not as its evidence.
+
+**Three further constraints hold this path in place.**
+
+- **Only the model's own commands.** A command a *user* types goes through pi's
+  `user_bash` event, which this extension does not register for. `tool_result` fires from
+  `agent.afterToolCall` and nowhere else, so a human's shell command can never have its
+  output replaced.
+- **Failed commands are skipped.** A non-zero exit makes pi's bash tool throw, which
+  arrives as `isError`, which the hook ignores.
+- **Reading the spill back is not a loop.** Every promotion ends with the spill file
+  path, and with a shell available the model takes that invitation by running `cat`. That
+  output is a perfect promotion candidate: it parses, resolves and verifies. So promoted
+  outputs are remembered by hash and never promoted twice. A repeated *grep* still
+  promotes — repeating a search is searching — but reading a spill file back returns the
+  spill file.
+
+Two shapes are deliberately not promoted, and both fail closed: `grep` without `-n`
+(`path:text` carries no line number and is far too weak a shape to key on) and
+`rg --column` (`path:line:col:text` parses, but the path it parses to does not exist, so
+it is refused at the resolution gate).
+
+Briefs are phrased per source on purpose. A grep pattern carries real intent, so that
+brief leans on it. A glob carries none — `**/*.ts` says only "these are TypeScript
+files" — so that brief asks what the files *are* rather than inviting the explorer to
+invent a purpose. A shell command carries the most of the three, since
+`rg -n --glob '!node_modules' 'tool_use_id' src/` states the pattern, the exclusions and
+the scope in one string; that brief quotes the command as a statement of intent and tells
+the explorer not to run it, because explorers have no shell.
+
+Adding `bash` to the trigger set does not widen the fork-bomb surface described under
+"Implementation notes". Explorers are spawned with `--tools read,grep,find,ls`, so an
+explorer has no shell whose output could promote even if both other layers were removed,
+and the `PI_FAST_EXPLORER_NESTED` check still runs first and still covers every tool.
 
 ### Partitioning
 
@@ -288,14 +392,14 @@ spec did not anticipate**: pi exposes no turn-limit flag, so the number rides in
 task text as a request the model is free to exceed. Nothing in this design bounds
 turn count; the only hard stops are `timeoutMs` and the model's own context limit.
 
-Source, added 2026-09-11: `bench/results/2026-09-11T04-37-10.json`, the 7 records with
+Source, added 2026-09-11: run `2026-09-11T04-37-10`, the 7 records with
 `turnCapExceeded: true` — `persistence`/explorer run 4, `persistence`/fanout runs 1–5,
 `cache-safety`/fanout run 1, each with `turns: 6`. The denominator is the 40
 explorer-arm runs; the 20 baseline runs have no budget and cannot overrun one, and six
 of them did exceed 5 turns without that meaning anything. That build folded the overrun
 into `ok`, so `coverage` is `null` for all 7 and this spec could not say how good they
 were. Re-scoring their stored reports gives **recall 1.00 on all 7**
-(`bench/results/2026-09-11T04-37-10-turncap-rescore.json`), so the budget was discarding
+(recorded as the derived artifact `2026-09-11T04-37-10-turncap-rescore.json`), so the budget was discarding
 seven answers that were entirely correct. The claim above was, if anything, too weak.
 
 One qualification in the other direction: pi retries a failed turn up to 3 times by
@@ -347,8 +451,8 @@ This analysis survived measurement; the conclusion drawn from it did not. Fan-ou
 was measured at 3.0–3.3x speedup against sequential execution of the same four
 explorers — near the ceiling of 4 — and was still slower end to end than the unaided
 baseline, exactly as the relationship above predicts: **+9,428 ms on the paired mean,
-slower in 14 of 15 paired runs** (`pairedLatency[(pooled), fanout]` in
-`bench/results/2026-09-11T09-12-16.json`). This paragraph said "1.36x slower" until
+slower in 14 of 15 paired runs** (`pairedLatency[(pooled), fanout]` in run
+`2026-09-11T09-12-16`). This paragraph said "1.36x slower" until
 2026-09-11; that ratio came from the blocked arm order and is withdrawn.
 
 The relationship also predicts something the first sweep got wrong. Since parallelism
@@ -392,16 +496,19 @@ cost are paid once, at the sweep, while the tokens would otherwise be paid on ev
 turn after it. Measured, a baseline sweep left 14,860–56,420 tokens of file contents
 in the main context; an explorer report is 1,100–1,382 tokens. (Corrected 2026-09-11:
 this range was 23,896–48,956, which was one of three 5-run context samples taken at the
-same settings. All three are now committed and the range spans them — see "Context" in
-the README.) The explorer's own
+same settings. The range now spans all three. (None of the three artifacts is
+published; the README no longer carries this table, or any other figure — see the
+amendment at the top of this document.) The explorer's own
 reading is spent in a subprocess and discarded on exit, so it never enters the main
 context at all — which is why per-run cost and per-run context are different
 measurements and must not be collapsed into one.
 
 ### Acceptance criteria
 
-One criterion remains, unchanged from the original three. It is falsifiable and is
+One criterion remains, unchanged from the original three. It is falsifiable and was
 measured by the benchmark suite described under "Benchmark", not asserted by hand.
+(That suite is not published — see the amendment at the top of this document. The
+criterion was tested against it; it cannot be re-tested from this repository.)
 
 - Main-agent context after exploration is **at least 5× smaller** than after the
   unaided sweep. **Met on 2026-09-11** — 20.3–35.7x measured.
@@ -422,8 +529,8 @@ wall-clock than the unaided main agent performing the same sweep*. There was a t
 criterion too, on time-to-first-token over the ten turns after a sweep.
 
 The first was measured on 2026-09-11 and **failed**. It was re-measured later the same
-day on a corrected harness and it failed by more. The current figures, from
-`bench/results/2026-09-11T09-12-16.json` — corpus `~/claude-plus-plus`, model
+day on a corrected harness and it failed by more. The current figures, from run
+`2026-09-11T09-12-16` — corpus `~/claude-plus-plus`, model
 `openai/gpt-5.6-luna`, 5 questions × 3 runs × 3 arms, arms interleaved:
 
 | subject vs baseline | paired mean delta | runs the subject lost | paired median ratio |
@@ -516,8 +623,8 @@ fan-out run, then every baseline run. The baseline was therefore systematically 
 last arm measured for each question, and the headline statistic was explorer over
 baseline. Anything that made later runs slower inflated the denominator and flattered
 the extension. Reconstructing arm start times by summing `records[].elapsedMs` in
-array order, the baseline block in `2026-09-11T08-02-02.json` began on average
-**171.8 s** later in the sweep than the explorer block. (`bench/run.ts`'s
+array order, the baseline block in run `2026-09-11T08-02-02` began on average
+**171.8 s** later in the sweep than the explorer block. (The harness's
 `FINDINGS["turn-budget-not-a-latency-lever"]` reports 169 s for the same sweep; it
 measured to each run's midpoint where `startOffsetMs` measures to its start. Nothing
 turns on the convention.)
@@ -586,7 +693,7 @@ central parallelism argument the same way the benchmark falsified its speed goal
 Fan-out is the configuration this design argues for most strongly, and it is the one
 with the worst evidence.
 
-The first sweep (`bench/results/2026-09-11T04-37-10.json`) measured four explorers on
+The first sweep (run `2026-09-11T04-37-10`) measured four explorers on
 a single question costing 3.6x as much as one ($0.0629 vs $0.0176 per run), matching
 the single explorer's recall exactly on every question both
 arms scored (median 1.00), with consistently worse precision because four explorers
@@ -602,7 +709,7 @@ case and the separable case had not been tested.
 
 #### The separable case, tested (2026-09-11, second sweep)
 
-`bench/results/2026-09-11T05-44-05.json` — same corpus, same model, current defaults,
+Run `2026-09-11T05-44-05` — same corpus, same model, current defaults,
 5 questions × 5 runs × 3 arms, 75 runs, no failures. A fifth question was added for
 this purpose: `bash-approval`, "when a shell command needs approval, how is that
 decided, how is the user asked, and how is an 'always allow' answer remembered?". Its
@@ -766,7 +873,7 @@ surprises.
   recall ranged 0.50–1.00 across five runs.
 - **Auto-promote false positives.** A grep the model intended as a quick existence
   check becomes an exploration — measured at a **22.0 s** pooled median for one
-  explorer (`records[].elapsedMs`, explorer arm, `2026-09-11T09-12-16.json`), not the
+  explorer (`records[].elapsedMs`, explorer arm, run `2026-09-11T09-12-16`), not the
   8 s guessed here. (This read "16.3s" until 2026-09-11, from the first sweep, which
   ran four easier questions at a lower turn cap. The two are not comparable and the
   later one is the corpus the rest of this document now uses.) Threshold tuning is
@@ -848,26 +955,38 @@ the hook promoted it: 105 files, four buckets, 311 match lines replaced by cited
 
 Two caveats keep this from being the end-to-end test the bullet asked for. **The run was
 not recorded** — no artifact, no session log, no spill file survives it, so its figures
-are an unreproducible measurement rather than something a reader can check; they are
-flagged as such in README limitation 8. And it establishes only that the path *executes*.
+are an unreproducible measurement rather than something a reader can check, and
+unlike the benchmark figures there is no withheld artifact they could be checked
+against. The README records the limitation without the figures; the figures are in
+[the limitations audit](../../LIMITATIONS-AUDIT.md) at §1.8 and §4.3. And it establishes only that the path *executes*.
 Nobody has scored a promoted result the way the benchmark scores `explore`, so the
 quality of what auto-promotion returns is still unmeasured. The seam is crossed; it is
 not covered.
 
 ## Benchmark
 
-Unit tests cannot tell us whether exploration is actually good. The benchmark is a
-separate, explicitly-invoked suite (`npm run bench`) that measures fast-explorer
-against an unaided baseline on a real codebase.
+Unit tests cannot tell us whether exploration is actually good. The benchmark was a
+separate, explicitly-invoked suite that measured fast-explorer against an unaided
+baseline on a real codebase.
+
+**Amended 2026-09-11: the suite described in this section is not part of the published
+repository.** It is specified here because the design called for it and because every
+number this document quotes came out of it — the section is the method behind those
+figures, not a description of something a reader can run. The harness named files and
+symbols from the corpus and its artifacts quoted that corpus's source; the corpus is
+private, so neither is published. There is no benchmark command in this repository.
 
 ### Corpus
 
 Default target: `~/claude-plus-plus` — a large, real, deeply-structured TypeScript
 codebase with genuine multi-file subsystems.
 
-The path is configurable via `BENCH_REPO`, and the suite **skips with a clear
-message when the repository is absent**. A published package must not hard-depend on
-a local clone, and CI will not have one.
+The path was configurable via `BENCH_REPO`, and the suite **skipped with a clear
+message when the repository was absent**. A published package must not hard-depend on
+a local clone, and CI will not have one. That safeguard turned out to be insufficient
+for publication on its own: the questions file still named corpus paths whether or not
+the corpus was present, which is why the harness was excluded outright rather than
+shipped with a skip.
 
 ### Baseline
 
@@ -993,11 +1112,15 @@ signature this metric pair was built to catch, and it caught it.
   LLM latency and output both vary enough that a single sample is meaningless.
 - Report per-arm cost so a quality win bought with a large cost increase is visible
   rather than hidden.
-- Results are written to `bench/results/<date>.json` and a summary table to stdout,
-  so runs are comparable across commits. Amended 2026-09-11: those artifacts were
-  gitignored, which made every number in this spec and the README uncheckable from a
-  clone. They are committed now, with the verbatim report text stripped — it quoted
-  ~1 MB of a private corpus. Every published figure is a field that survives the strip.
+- Results were written to a timestamped JSON artifact per run, plus a summary table to
+  stdout, so runs are comparable across commits. Amended 2026-09-11, twice: those
+  artifacts were gitignored, which made every number in this spec and the README
+  uncheckable from a clone; they were then committed with the verbatim report text
+  stripped, that text having quoted ~1 MB of the private corpus. They are **not**
+  published in the end. Stripping the report text was not enough, because the harness
+  and the artifact metadata still identify the corpus. Every number here is therefore
+  quoted with its run identifier and field name and nothing more — provenance without
+  verifiability.
 - **Interleave the arms.** Amended 2026-09-11: the suite ran them in per-question
   blocks, which put the baseline last every time and made the latency comparison a
   partial readout of execution order. Arms now rotate run-by-run, every record carries
@@ -1014,14 +1137,16 @@ Recorded because these are the limits of every number this spec now quotes.
 - **Only an interleaved sweep can support a latency comparison.** The first four
   sweeps blocked the arms with the baseline last, so their cross-arm latency ratios are
   uninterpretable and are withdrawn wherever this document quoted them. Everything else
-  those sweeps measured stands. Check `executionOrder.interleaved === true` before
-  comparing any future latency number against the ones here.
+  those sweeps measured stands. `executionOrder.interleaved === true` is the flag that
+  distinguishes them, and is what any future measurement of this should be checked for —
+  though not from this repository, which holds neither the harness nor the artifacts.
 - **One model, one corpus.** All results are `openai/gpt-5.6-luna` on
   `~/claude-plus-plus`. The output contract is a prompt, so contract compliance and
   quote fidelity are properties of that model as much as of this design; the latency
-  penalty is per-turn cost, which is a property of that model. `BENCH_MODEL` and
-  `BENCH_REPO` exist so this can be rerun, not so the result can be assumed to
-  transfer.
+  penalty is per-turn cost, which is a property of that model. The harness took
+  `BENCH_MODEL` and `BENCH_REPO` so this could be rerun elsewhere, and nothing should be
+  assumed to transfer without that — but the harness is not published, so re-running it
+  is not an option this repository offers anyone.
 - **One separable question, measured once.** Four of the five questions are saturated
   by a single explorer, which is why fan-out measures as pure waste on them. The
   fifth was added to test the case the design's parallelism argument rests on, and
@@ -1112,4 +1237,4 @@ penalised for not citing a file with nothing relevant in it. A benchmark that ma
 correct answers wrong is worse than no benchmark, because the obvious response is to
 "fix" the tool until it chases the error.
 
-`bench/questions.ts` was corrected first; this table had drifted from it.
+The harness's questions file was corrected first; this table had drifted from it.

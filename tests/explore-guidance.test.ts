@@ -9,7 +9,7 @@ import { EXPLORE_DESCRIPTION, EXPLORE_PROMPT_GUIDELINES } from "../src/index.js"
  * matters. The guidance used to tell the model to decompose whenever it could,
  * which bought that trade on every call.
  *
- * The second sweep (`bench/results/2026-09-11T05-44-05.json`) added a question
+ * The second sweep (run `2026-09-11T05-44-05`; artifact not published) added a question
  * whose answer genuinely spans four subsystems — fan-out's best case, and the
  * case the guidance then steered toward. Fan-out lost it too: 2.3x the cost for
  * recall 0.80 against the single explorer's 1.00, missing the same ground-truth

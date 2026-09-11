@@ -3,8 +3,31 @@
 **Date:** 2026-09-11 · **Branch:** `feat/v1-implementation` @ `af1bb37` · **pi:** 0.85.1 · **Node:** v22.22.2 (darwin 25.6.0)
 **State at audit:** 345 tests passing across 19 files (`npx vitest --run`, re-run during this audit), both typechecks clean.
 
-This is an audit, not a fix pass. Nothing under `src/`, `prompts/` or `bench/` was changed. Every
-probe was run from `/tmp` against a build of `src/` placed in `/tmp/fx-dist`.
+This is an audit, not a fix pass. Nothing under `src/`, `prompts/` or the benchmark harness was
+changed. Every probe was run from `/tmp` against a build of `src/` placed in `/tmp/fx-dist`.
+
+> **Read this first: the benchmark harness and its result artifacts are not in this repository.**
+> Every sweep ran against `~/claude-plus-plus`, a private third-party repository; the harness names
+> files and symbols from that corpus and the artifacts quote its source, so neither is published.
+> This document cites both heavily, because it is an audit of where the project's numbers came from
+> and that is not a question you can ask without naming sources. Those citations are provenance, not
+> directions: a run identifier like `2026-09-11T05-44-05` is the filename of a result artifact you
+> cannot open, and `the harness` is a source file you cannot read. Every verdict below tagged
+> **Measured** against a benchmark artifact was checked at the time, by someone holding the file; it
+> cannot be re-checked from a clone. Verdicts resting on probes against `src/` — which is most of
+> Part 2 — are reproducible, since `src/` is published.
+>
+> This audit predates the decision to exclude the harness. Where a finding is *about* the artifacts
+> being unavailable (see [2.15](#215-the-benchmark-artifacts-are-not-in-the-repository)), it has been
+> updated; the substance of everything else is left as it was written.
+>
+> **`README.md` has since been cut back to a user-facing document and no longer carries any benchmark
+> figure.** Every `README.md:<line>` reference below therefore points at text that has moved or gone —
+> the line numbers were already as-of `af1bb37`, and the content is now in this document and in the
+> spec instead. Those references are kept because they record *where a claim was published when it was
+> audited*, which is the point of §4. Read them as citations into the history, not into the current
+> file. The figures themselves are preserved here: this document and the spec are now the only places
+> they appear.
 
 > **Since this audit, three of its findings have been fixed** — [2.1](#21-the-headline-a-stopreason-change-in-pi-turns-every-sweep-into-a-paid-no-op)/[2.2](#22-auto-promotion-replaces-the-tool-result-even-when-every-explorer-failed) (the `stopReason` inversion and the missing fallback),
 > [2.4](#24-the-unmarked-failure-guarantee-is-vacuous-for-three-shapes-the-parser-cannot-see) (the parser's blind spots), and the size-cap half of [2.8](#28-quote-verification-reads-whole-files-with-no-size-cap-and-is-not-confined-to-the-repository).
@@ -41,8 +64,10 @@ docs does not match its source, or has no source at all, that is recorded as a f
 4. **The context table's numbers are correct but misattributed**, and the headline range `20–36x` is
    artifact-selection-dependent — an equally valid artifact taken at the same settings gives `20–32x`.
    See [4.1](#41-the-context-table-is-sourced-from-an-artifact-the-readme-never-cites).
-5. **`bench/results/` is gitignored.** Both artifacts the README cites by filename are absent from
-   the repository. Nobody who clones this can check a single number in it. See [2.15](#215-the-benchmark-artifacts-are-not-in-the-repository).
+5. **The benchmark artifacts are not in the repository.** Both artifacts the README cites by filename
+   are absent from it. Nobody who clones this can check a single number in it. (At audit time this was
+   a gitignore that could have been reversed, and it briefly was. It is now permanent — the artifacts
+   are withheld because the corpus is private. See [2.15](#215-the-benchmark-artifacts-are-not-in-the-repository).)
 
 **Counts.** 38 documented claims examined — 16 README "Known limitations", 12 README prose claims,
 10 spec claims:
@@ -72,7 +97,7 @@ explorer never missed it.
 
 **Verdict: still true. Measured.**
 
-`bench/results/2026-09-11T05-44-05.json` — the `fanout` arm's records for `bash-approval` runs 2, 3, 4
+Run `2026-09-11T05-44-05` — the `fanout` arm's records for `bash-approval` runs 2, 3, 4
 and 5 each carry `missed: ["src/hooks/toolPermission/handlers/interactiveHandler.ts"]`. The `explorer`
 arm missed a ground-truth file in exactly one run (run 3, `permissions.ts`) and never that file; the
 `baseline` arm missed one in run 5 (`bashPermissions.ts`). The "4 of 5", the identity of the file, and
@@ -115,8 +140,9 @@ comparison, is gated to all-comment quotes, is bounded to one maximal run of con
 and matches case-insensitively.
 
 The figures — **49,985 mutations, 182 escaped (0.364%)**, and **43,777 code-quote mutations, none
-escaped** — have **no artifact, no script and no test anywhere in the repo**. They appear only as prose
-in `README.md:335`, `README.md:398`, `bench/run.ts:1852-1855` and the spec at `:746-749`. They are
+escaped** — have **no artifact, no script and no test anywhere**, and never did; unlike the benchmark
+figures, there is no withheld file they could in principle be checked against. They appear only as prose
+in `README.md:335`, `README.md:398`, the harness's `FINDINGS` block and the spec at `:746-749`. They are
 internally consistent (182/49,985 = 0.3641%) and nothing more. A one-off script that was not kept.
 
 #### 1.5 Spill files are never deleted
@@ -200,7 +226,7 @@ carries conversation history. Not independently falsifiable here.
 
 #### 1.12 Non-determinism
 
-**Verdict: true. Measured.** `bench/results/2026-09-11T04-37-10.json`, question `tracking`, arm
+**Verdict: true. Measured.** Run `2026-09-11T04-37-10`, question `tracking`, arm
 `explorer`: recall `[0.5, 1, 1, 1, 1]`, latency 16,040–17,678 ms across five runs.
 
 #### 1.13 `explore` without `questions` is not parallel
@@ -251,7 +277,7 @@ for the one provenance problem, which does not touch these numbers.
 | `fanout 19,051 ms / 1.36x / $0.0629` | **true** | Same artifact. |
 | `20–36x less context` | **numbers true, source misattributed and selection-dependent** | See [4.1](#41-the-context-table-is-sourced-from-an-artifact-the-readme-never-cites). |
 | Citation-quality table (520 blocks, 386/119/15, median 1.00 min 0.67) | **true** | `quoteRates.quotes = 520`; verdicts 386 + 119 + 11 + 4 = 520; 11 `fabricated` + 4 `missing-file` = 15 (2.88%); `deliveredExactAnchors {median:1, min:0.6667, n:33}`. |
-| Second sweep: 75 runs, 0 failures, $2.79, recall/precision/latency/cost tables, `4 of 5`, `3 of 5`/`2 of 5`/`0 of 5` turn overruns, `3.6x`, `2.3x`, `2.98–3.56x`, `62 of 1,275 (4.9%)`, `min 0.00 on two questions`, `1.08x` | **all true** | `2026-09-11T05-44-05.json`; `FABRICATION_CEILING = 0.06` and `FABRICATION_RATE_AT_LAST_RATCHET = 0.0486` in `bench/run.ts`. "34 minutes" is `wallClockMs = 2,011,253` = 33.5 min — rounds up, generous but not wrong. |
+| Second sweep: 75 runs, 0 failures, $2.79, recall/precision/latency/cost tables, `4 of 5`, `3 of 5`/`2 of 5`/`0 of 5` turn overruns, `3.6x`, `2.3x`, `2.98–3.56x`, `62 of 1,275 (4.9%)`, `min 0.00 on two questions`, `1.08x` | **all true** | Run `2026-09-11T05-44-05`; `FABRICATION_CEILING = 0.06` and `FABRICATION_RATE_AT_LAST_RATCHET = 0.0486` in the harness. "34 minutes" is `wallClockMs = 2,011,253` = 33.5 min — rounds up, generous but not wrong. |
 | `pi's per-call truncation (50 KB / 2000 lines)` | **imprecise for the tools that matter** | Constants are real (`dist/core/tools/truncate.js:10-11`), but grep and find both override the line cap: `truncateHead(raw, { maxLines: Number.MAX_SAFE_INTEGER })` at `grep.js:215` and `find.js:97,213`. Effective caps: **50 KB + 100 matches** (grep), **50 KB + 1000 results** (find). |
 | `rg --column` "parses, but the text no longer matches the file's line, so verification refuses it" | **right outcome, wrong mechanism** | Probe: `src/a.ts:11:5:  const x = 1;` parses to `{file: "src/a.ts:11", line: 5}`. That path does not exist, so the result is rejected at the **resolution** gate (0% resolve, `src/detect.ts:148`), before `verifyMatchedLines` is ever called. |
 | `grep` without `-n` is not promoted | **true** | Probe: `parseGrepMatches("src/a.ts:const x = 1;")` → `[]`. |
@@ -273,7 +299,7 @@ for the one provenance problem, which does not touch these numbers.
 | `:249-260` config default block | **stale** | Omits `autoPromote.bash`. |
 | `:162` "Concurrency is capped at 4" | **imprecise** | 4 is the *default*. `resolveConfig` enforces only `1 <= maxFanout <= concurrency`; nothing caps `concurrency`. |
 | `:265-267` "7 of 40 … every one of them by landing on exactly 6 turns" | **true** | See [4.2](#42-the-turn-overrun-figure-is-conflated-across-three-documents) — this is the *correct* version. |
-| `:721` "Any non-zero hallucination rate is a release blocker" | **superseded, not amended** | The spec records the gate failing at `:738-744` but never records that `bench/run.ts` replaced it with a 6% ratchet plus a marking-completeness check. The README does record it. |
+| `:721` "Any non-zero hallucination rate is a release blocker" | **superseded, not amended** | The spec records the gate failing at `:738-744` but never records that the harness replaced it with a 6% ratchet plus a marking-completeness check. The README does record it — and now also records that the ratchet went with the harness, so nothing in the published repository gates that rate. |
 
 ---
 
@@ -416,7 +442,7 @@ and `#` comment openers. So:
   produces headers the parser cannot read. On a non-TypeScript corpus, quote verification is
   substantially or entirely a no-op, and the fidelity number reads 100% because nothing was checked.
 
-The benchmark cannot see this either: `bench/run.ts:1837`'s "153 of 1,376 blocks carry no header" finding is
+The benchmark cannot see this either: the harness's "153 of 1,376 blocks carry no header" finding is
 real, but **all 153 headerless blocks are in the `baseline` arm**, which was never inside the
 guarantee. Restricted to explorer-arm reports the count is 1,223 blocks and **0** headerless — one
 model, on one TypeScript corpus, following the contract.
@@ -650,14 +676,26 @@ the strongest contract signal available for it.)
 
 **Measured. Severity: medium for a published package.**
 
-`git check-ignore -v bench/results/2026-09-11T05-44-05.json` → `.gitignore:3:bench/results/`.
+*As written at audit time:* the result artifacts were gitignored, as was `dist/`. Both artifacts the
+README cited by filename were therefore absent. Every sourced number in the README and the spec was
+uncheckable from a clone — including the numbers that argue *against* the extension, which is the part
+a reader most needs to be able to verify. Compounding it: the README's headline latency/cost table is
+a **pooled median across all runs of an arm**, a statistic the harness never computed or printed — it
+emitted per-question stats only. The table is a README-side derivation, reproducible only by someone
+holding artifacts they cannot obtain.
 
-Both artifacts the README cites by filename are gitignored, as is `dist/`. Every sourced number in the
-README and the spec is therefore uncheckable from a clone — including the numbers that argue *against*
-the extension, which is the part a reader most needs to be able to verify. Compounding it: the
-README's headline latency/cost table is a **pooled median across all runs of an arm**, a statistic
-`bench/run.ts` never computes or prints — it emits per-question stats only. The table is a README-side
-derivation, reproducible only by someone holding artifacts they cannot obtain.
+**Status: acted on, reversed, then settled the other way — and this finding now stands permanently.**
+The artifacts were un-ignored and committed in response to this finding, with the verbatim report text
+stripped. That did not survive the decision to publish: the harness names files and symbols from
+`~/claude-plus-plus`, a private third-party repository, and the artifacts carry its identity in their
+metadata, so both were removed from the repository and from git history. The finding is therefore
+correct as originally written and is no longer fixable. What changed in response is the *framing*
+rather than the availability: the README now states up front that the harness and artifacts are
+excluded and why, every figure names the run and field it came from as provenance rather than as a
+pointer, and the README-side derivations are labelled as derivations. A reader is told plainly that
+these numbers were measured in runs they cannot see. That is the best available answer to this
+finding, and it is worth being clear that it is a mitigation and not a fix — the substance of the
+objection, that the unflattering numbers cannot be independently verified, is conceded.
 
 ### 2.16 Windows: `spawn("pi", …, {shell: false})` and npm's `pi.cmd` shim
 
@@ -734,12 +772,12 @@ know it.
 **1. It is slower and costlier per sweep than not using it. — Measured**
 1.16x and 1.36x in the first sweep, 1.08x for both configurations in the second, with the unaided
 baseline ahead on every question of four and on four of five. The win is context, recall on focused
-questions, and verified citations; it is bought with latency and money. *(`bench/results/2026-09-11T04-37-10.json`, `2026-09-11T05-44-05.json`.)*
+questions, and verified citations; it is bought with latency and money. *(Runs `2026-09-11T04-37-10`, `2026-09-11T05-44-05`.)*
 
 **2. "Recall 1.00" is a median, never a guarantee. — Measured**
 At the current defaults the single-explorer arm scored recall 0.00 on at least one run of two of the
 five questions. Five runs per question per arm; treat every number here as a median with spread.
-*(`bench/results/2026-09-11T05-44-05.json`.)*
+*(Run `2026-09-11T05-44-05`.)*
 
 **3. Partition blindness — `questions` has no measured case in its favour. — Measured**
 On the one question whose answer spans four subsystems, four explorers missed the file holding the
@@ -884,9 +922,10 @@ not then read the matched files — and that counterfactual has never been measu
 
 **23. Everything above was measured on one model and one corpus. — Measured**
 `openai/gpt-5.6-luna` on `~/claude-plus-plus`, macOS, pi 0.85.1. The citation contract is a prompt; the
-latency ratio is a property of that model. Run `BENCH_MODEL=… BENCH_REPO=… npm run bench` before
-assuming any of it transfers. Note also that `bench/results/` is gitignored, so the artifacts these
-numbers come from are not in this repository.
+latency ratio is a property of that model. Nothing should be assumed to transfer to another model or
+another codebase without re-measurement. Note also that neither the harness nor the artifacts these
+numbers come from is in this repository, so re-measuring is not something a reader of this repository
+can do — see [2.15](#215-the-benchmark-artifacts-are-not-in-the-repository).
 
 ---
 
@@ -895,12 +934,12 @@ numbers come from are not in this repository.
 ### 4.1 The context table is sourced from an artifact the README never cites
 
 **README:** "The first sweep, below, is where the latency, context and citation-quality numbers come
-from — `bench/results/2026-09-11T04-37-10.json`."
+from — run `2026-09-11T04-37-10`."
 
 Every cell of the context table reproduces exactly — 23,896 / 1,100 / 21.7x, 39,688 / 1,382 / 28.7x,
 27,241 / 1,344 / 20.3x, 48,956 / 1,371 / 35.7x, and the fan-out column 3,858 / 3,400 / 3,874 / 4,351.
 But **the baseline column is not in `2026-09-11T04-37-10.json` at all.** It comes from
-`bench/results/2026-09-11T05-06-53-context.json`, a later, separate set of 20 baseline runs that the
+run `2026-09-11T05-06-53-context`, a later, separate set of 20 baseline runs that the
 README never mentions. The baseline runs behind the latency table and the baseline runs behind the
 context table are different runs.
 
@@ -949,7 +988,7 @@ None of these is wrong; none can be checked.
 
 | Figure | Where | Status |
 |---|---|---|
-| 49,985 mutations / 182 escapes / 0.364%; 43,777 code mutations / 0 escapes | `README.md:335,398`, spec `:746-749`, `bench/run.ts:1852-1855` | No script, test or data file. One-off, not kept. |
+| 49,985 mutations / 182 escapes / 0.364%; 43,777 code mutations / 0 escapes | `README.md:335,398`, spec `:746-749`, the harness's `FINDINGS` block | No script, test or data file, and never any artifact — weaker than the withheld-artifact figures. One-off, not kept. |
 | Auto-promotion end-to-end run: 105 files, 311 match lines, $0.129, 13.3k output tokens, 29,626 vs 26,401 bytes | `README.md:406` | No session log, no artifact, no spill file. |
 | clang counter-example: 20 files, 80 KB, 2,710 bytes, `{attempted: 10, verified: 0}` | `README.md:152` | No artifact. `tests/bash-promote.test.ts` has analogous synthetic tests with different numbers. |
 | Fork-bomb branching factor "measured at roughly 40 per level" | `README.md:234`, spec `:833` | Arithmetic is right (40², 40³); the measurement has no artifact. |
@@ -961,24 +1000,24 @@ These are comments, not shipped claims, but they are cited as evidence for thres
 
 | Figure | Where | Status |
 |---|---|---|
-| "1,265 quotes in the stored reports" | `src/citations.ts:446,483` | **Was exactly right** against the pre-second-sweep `bench/results/` (202+45+202+145+671). Today the same computation gives **2,541**. Stale. |
+| "1,265 quotes in the stored reports" | `src/citations.ts:446,483` | **Was exactly right** against the pre-second-sweep result artifacts (202+45+202+145+671). Today the same computation gives **2,541**. Stale. |
 | "140 stored reports" | `src/citations.ts:488` | **Was exactly right** as *all* records with a non-empty report across the same five files (20+8+40+12+60) — note this includes the baseline arm, a different denominator from the 1,265, which covers only the 92 explorer-arm reports. Today: 215 / 142. Stale. |
 | "2,096 reference files", "3.4M lines", "2,167-file repo", "44,543 `}` lines in 1,764 files, 135 (7.7%) with exactly one" | `src/citations.ts:91, 408, 418-420, 692` | **Not reproducible.** Live corpus: 2,190 git-tracked non-`node_modules` files; 2,047 tracked `.ts`/`.tsx`; 535,727 lines in those; 2,490,060 lines across all non-`.git`/non-`node_modules` files. 2,167 is within 1% of 2,190 and plausible; 2,096 and 3.4M match nothing constructible. |
 
 ### 4.5 Artifact schema drift
 
-Both cited artifacts were written by an **older `bench/run.ts`** than the file on disk. Their `gates`
-are `["scoreable runs", "contract compliance", "quote fabrication"]`; the current `bench/run.ts` emits
-four, including `"no unmarked failures"` and `"fabrication ratchet (<= 0.06)"` (`bench/run.ts:1033`,
+Both cited artifacts were written by an **older build of the harness** than the one on disk at audit time. Their `gates`
+are `["scoreable runs", "contract compliance", "quote fabrication"]`; the later harness emitted
+four, including `"no unmarked failures"` and `"fabrication ratchet (<= 0.06)"` (
 with `FABRICATION_CEILING = 0.06` at `:121` and `FABRICATION_RATE_AT_LAST_RATCHET = 0.0486` at `:129`). The first sweep's `score`
 objects have no `checkableQuotes`/`failedQuotes`/`unverifiableQuotes`, and neither artifact carries
 `fabricationCeiling`, `fabricationRateAtLastRatchet` or `verdictCoverage`. Re-running today would not
 reproduce these files' shape. No number changes, but the README's "the artifact records that failure"
 refers to a gate that no longer exists under that name.
 
-### 4.6 The `bench/run.ts` "153 headerless blocks" finding is scoped to the control arm
+### 4.6 The harness's "153 headerless blocks" finding is scoped to the control arm
 
-`FINDINGS` (`bench/run.ts:1837`) reports "153 of 1,376 blocks carry no header … outside the guarantee
+The harness's `FINDINGS` block reports "153 of 1,376 blocks carry no header … outside the guarantee
 entirely". Both counts
 reproduce over the pre-second-sweep reports — but **all 153 are in `baseline` reports**, which were
 never shown the output contract and are explicitly excluded from citation scoring. Restricted to

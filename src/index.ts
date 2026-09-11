@@ -105,7 +105,8 @@ export const EXPLORE_PROMPT_GUIDELINES = [
  *
  * The fallback to a single brief is the common case, not a degraded one — and
  * on the evidence it is the better one everywhere it has been measured.
- * `bench/results/2026-09-11T05-44-05.json`, 5 questions x 3 arms x 5 runs:
+ * Benchmark run `2026-09-11T05-44-05`, 5 questions x 3 arms x 5 runs (that run's
+ * artifact is not published — see README):
  * fan-out never beat one explorer on recall and was worse on precision on all
  * five. On the four questions one explorer saturated it cost 3.6x for identical
  * recall. On `bash-approval` — added to give fan-out its best case, an answer

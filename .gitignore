@@ -1,19 +1,21 @@
 node_modules/
 dist/
-# bench/results/*.json IS tracked — every number in README.md and the design spec
-# has to resolve to a file someone who clones this can open. What is not tracked is
-# the verbatim report text those runs produced: it embeds ~1 MB of source from the
-# benchmark corpus, which is a private third-party repository.
+# The benchmark harness and ALL of its result artifacts are excluded from this
+# repository and from its git history. Every sweep ran against ~/claude-plus-plus,
+# a private third-party repository: the harness named files and symbols from that
+# corpus, and the artifacts quoted its source. Nothing under bench/ is published.
 #
-# That separation is enforced by `bench/run.ts`, not by hand. The sweep writes the
-# untouched reports HERE first, then strips them from the artifact it writes to
-# bench/results/ and scans the serialised result for leaked report text before
-# writing it; a leak aborts the write rather than producing a file that looks
-# committable. `npm run bench -- --verify-artifacts` re-checks every file already
-# in bench/results/ and is worth running before any `git add` of that directory.
+# An earlier plan was to commit the artifacts with the verbatim report text stripped,
+# so that the numbers in README.md would resolve to files a reader could open. That
+# was reversed — stripping the report text was not enough, because the harness and
+# the artifact metadata still identify the corpus. README.md states the exclusion
+# and its consequence: the published numbers name the run and field they came from,
+# and cannot be independently verified from this repository.
 #
-# This line is the last defence, not the first. Do not remove it, and do not force
-# anything under it into a commit.
-bench/results/raw-reports/
+# This entry stays because untracked working copies may still exist on a developer's
+# machine — including bench/results/raw-reports/, which holds the UNSTRIPPED reports
+# and therefore ~1 MB of the private corpus's source. It is the last defence, not the
+# first. Do not remove it, and do not force anything under it into a commit.
+bench/
 *.log
 .claude-flow/
