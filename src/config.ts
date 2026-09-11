@@ -48,6 +48,27 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	 * fast lives in prompts/explorer.md ("aim for about 3 turns"), which is where it
 	 * works; this number is the outer edge, set above the observed overrun rather
 	 * than through it.
+	 *
+	 * That original argument has since been retired at its source — `bench/run.ts`
+	 * now reports overruns in their own column instead of folding them into `ok` —
+	 * so 6 was tried on 2026-09-11 to see whether a tighter budget bought back
+	 * latency. It did not, and the number stayed at 8. Do not re-run that
+	 * experiment without reading `FINDINGS["turn-budget-not-a-latency-lever"]` in
+	 * bench/run.ts first. In short:
+	 *
+	 *  - Cap 6 (sweep 08-29-29) landed at an explorer-vs-baseline ratio of 1.35,
+	 *    against 1.34 for cap 8 (08-02-02) — no recovery at all.
+	 *  - Across five sweeps the ratio is ordered perfectly by a HARNESS artifact
+	 *    and not at all by the cap. Caps in ratio order run 8, 5, 8, 6, 5.
+	 *  - The gap is per-turn, not per-run: in two of three sweeps the explorer took
+	 *    FEWER turns than the baseline and was still slower, because each explorer
+	 *    turn costs 22-45% more (ten concurrent searches plus a structured report).
+	 *    A turn budget cannot reach that term.
+	 *
+	 * Lowering it is also not free. Every `bash-approval` run that reached recall
+	 * 1.00 used 5, 9, 9 or 15 turns; every run that finished in 6-7 turns scored
+	 * 0.60-0.80. At 6 no run took the turns that question needs, and its median
+	 * recall stayed at 0.80.
 	 */
 	maxTurnsPerExplorer: 8,
 	minTotalBytes: 51200,
