@@ -13,7 +13,7 @@ fast-explorer fans that reading out to explorer subagents. Each explorer is a se
 Two entry paths:
 
 - **The `explore` tool** — the model calls it when it knows a sweep is coming.
-- **Auto-promotion** — a `tool_result` hook intercepts `grep`/`find` results that span many files and converts them into parallel exploration without being asked. This path matters more in practice, because the common failure is the model *not* knowing a sweep was coming.
+- **Auto-promotion** — a `tool_result` hook intercepts `grep`, `find` and shell search results that span many files and converts them into parallel exploration without being asked. This path matters more in practice, because the common failure is the model *not* knowing a sweep was coming.
 
 ## What it trades
 
@@ -107,7 +107,7 @@ The tool returns the concatenated explorer reports. Explorers that failed, timed
 
 ## Auto-promotion
 
-The `tool_result` hook watches successful `grep` and `find` results. It promotes when the result looks like a sweep **and** there is enough material to be worth the overhead. Those are two separate gates:
+The `tool_result` hook watches successful `grep`, `find` and `bash` results. It promotes when the result looks like a sweep **and** there is enough material to be worth the overhead. Those are two separate gates:
 
 **Is it a sweep?** (`shouldAutoPromote`, breadth *or* density — not a single threshold)
 
@@ -127,9 +127,37 @@ When both gates pass:
 
 Nothing is destroyed: the full match list is on disk and its path is in the result. The model can read it if the findings are not enough.
 
-Grep and find briefs are phrased differently on purpose. A grep pattern carries real intent, so the brief leans on it. A glob carries none — `**/*.ts` says only "these are TypeScript files" — so that brief asks what the files *are* rather than inviting the explorer to invent a purpose.
+Briefs are phrased per source on purpose. A grep pattern carries real intent, so that brief leans on it. A glob carries none — `**/*.ts` says only "these are TypeScript files" — so that brief asks what the files *are* rather than inviting the explorer to invent a purpose. A shell command carries the most of the three, since `rg -n --glob '!node_modules' 'tool_use_id' src/` states the pattern, the exclusions and the scope in one string; that brief quotes the command as a statement of intent and tells the explorer not to run it, because explorers have no shell.
 
-Auto-promotion is a trade, not a free win. A grep the model intended as a quick existence check becomes several seconds of exploration and a model call per bucket. Set `autoPromote.enabled` to `false` to keep only the explicit `explore` tool.
+Auto-promotion is a trade, not a free win. A grep the model intended as a quick existence check becomes several seconds of exploration and a model call per bucket. Set `autoPromote.enabled` to `false` to keep only the explicit `explore` tool, or `autoPromote.bash` to `false` to keep the hook for the structured tools only.
+
+### Why `bash` is in the trigger set
+
+Because a hook watching only `grep` and `find` was measured missing the case it exists for. Asked *explicitly* to "use the grep tool" to search `src/`, a real session on pi's default toolbelt ran this instead:
+
+```json
+{"type":"tool_execution_end","toolName":"bash",
+ "args":{"command":"grep -RIn -- \"tool_use_id\" src/"}}
+```
+
+The same session restricted to `--tools read,grep,find,ls` promoted correctly, so the machinery was right and only the trigger was too narrow. `bash` ships in pi's default tool set, and models reach for it.
+
+Detection is by **output shape, not by command parsing**. Nothing here knows what `grep`, `rg`, `ag` or `git grep` are, and nothing tries to unpick pipes, flags or quoting; the end-to-end run that confirmed this works was a `rg -n` invocation that no hand-written command parser in this repository would have recognised. What the hook does instead is parse the output as `path:line:text` and then demand that the output describe *this repository*:
+
+- **Paths resolve.** At least 90% of the distinct parsed paths must exist as files on disk. Real search output resolves at 1.00; a Node stack frame parses as `    at a (/tmp/crash.js`, a vitest failure as ` ❯ x.test.ts`, a syslog line as `2026-09-11 12`, and none of those resolve at all. The 10% of slack absorbs the ways a genuine sweep loses a path — output the bash tool truncated mid-line, a file deleted between the search and the hook — and allows exactly one bad path in the smallest promotable sweep.
+- **The text is the file's line.** Up to 10 rows, strided across the match list, are read back off disk and compared against the file's real content at the cited line. This is the gate resolution cannot cover, and it is not hypothetical: compilers and linters emit `path:line:col: message` about real files, so they pass a resolution check outright. mypy's default `path:line: error: …` parses to a real file at a real line. What a diagnostic cannot do is carry the file's actual source text there, because it is a message *about* the line. Search output round-trips exactly; 80% of the sample must match.
+
+Both gates are mechanical properties of the output. Neither enumerates a tool, a command or a message format, so nothing rots when clang rewords a diagnostic or someone reaches for a grep clone this extension has never heard of.
+
+That second gate is load-bearing, and the proof is a real session rather than a fixture. Twenty C files, 80 KB, each with a warning on line 3, compiled with `-fno-show-column -fno-caret-diagnostics` so the output is exactly `path:line: message`, and `-Wno-error` so the command exits 0 and cannot be dismissed as a failed tool call. A real `gpt-5.6-luna` session ran it and the result was **not** promoted — the model got clang's 2,710 bytes back byte for byte. Every cheap gate had passed: 20 distinct paths, all 20 resolving, 80 KB of matched files. `verifyMatchedLines` returned `{ attempted: 10, verified: 0 }`, and that is the only reason the raw diagnostics survived.
+
+Three more things hold this path in place:
+
+- **Only the model's own commands.** A command *you* type at the prompt goes through pi's `user_bash` event, which this extension does not register for. `tool_result` fires from `agent.afterToolCall` and nowhere else, so a shell command run by a human can never have its output replaced. The bash the hook sees was chosen by the model, in exactly the way it chooses `grep`.
+- **Failed commands are skipped.** A non-zero exit makes pi's bash tool throw, which arrives as `isError`, which the hook ignores — so the usual broken build never reaches the gates in the first place.
+- **Reading the spill back is not a loop.** Every promotion ends with "Raw command output saved to: …", and with a shell available the model takes that invitation by running `cat`. That output is a perfect promotion candidate: it parses, resolves and verifies. So promoted outputs are remembered (32 of them, by hash) and never promoted twice. A repeated *grep* still promotes — repeating a search is searching — but reading a spill file back returns the spill file.
+
+Two shapes are deliberately not promoted, and both fail closed: `grep` without `-n` (`path:text` carries no line number and is far too weak a shape to key on) and `rg --column` (`path:line:col:text` parses, but the text no longer matches the file's line, so verification refuses it).
 
 ## Configuration
 
@@ -143,7 +171,7 @@ Defaults:
   "concurrency": 4,
   "maxTurnsPerExplorer": 8,
   "minTotalBytes": 51200,
-  "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
+  "autoPromote": { "enabled": true, "bash": true, "minFiles": 15, "minMatches": 60 },
   "timeoutMs": 120000
 }
 ```
@@ -156,7 +184,8 @@ Defaults:
 | `concurrency` | Ceiling on explorers running at once, extension-wide (see limitations). |
 | `maxTurnsPerExplorer` | Turn budget written into each explorer's task text, phrased as a target to come in under. pi has no turn-limit flag, so this is **advisory** — an explorer can and sometimes does exceed it, and nothing here prevents that. It was 5; 5 was measured failing runs that had already succeeded (7 of 60 runs over budget, 5 of them at exactly 6 turns with full recall), so it is 8. The pressure to finish fast lives in `prompts/explorer.md`, which asks for about 3 turns. |
 | `minTotalBytes` | Byte floor below which exploration is skipped and the original result is left alone. |
-| `autoPromote.enabled` | Turns the `grep`/`find` hook off without affecting the `explore` tool. |
+| `autoPromote.enabled` | Turns the whole `tool_result` hook off without affecting the `explore` tool. |
+| `autoPromote.bash` | Whether `bash` results that parse as search output are promoted too. Separate from `enabled` because the risk profile differs, not the feature: a `grep` result is a search by construction, while a `bash` result is whatever the model ran, so promoting it rests on inferring intent from output shape. Turn it off to keep promotion for the structured tools only. |
 | `autoPromote.minFiles` | Breadth threshold — distinct matched files. |
 | `autoPromote.minMatches` | Density threshold — total matches, requires at least 3 files. |
 | `timeoutMs` | Per-explorer wall-clock limit. On expiry the child gets `SIGTERM`, then `SIGKILL` after a 5-second grace period, and its bucket is reported as not covered. |
@@ -207,6 +236,8 @@ Without it, pi's extension discovery runs inside every explorer, which means eve
 Verified against pi 0.85.1: neither print mode (`-p`) nor `--no-session` stops extension discovery. `--no-extensions` is what stops it.
 
 There is a second layer, because `--no-extensions` cannot cover everything: explicit `-e <path>` loads still work with that flag set, and discovery is never consulted for them. So every explorer is spawned with `PI_FAST_EXPLORER_NESTED=1` in its environment (inherited by the whole subtree), and the auto-promotion hook's very first action is to return early when it sees that variable. Either layer alone would hold today; both are cheap and the failure mode is a fork bomb.
+
+Adding `bash` to the trigger set does not widen any of this. There is a third layer under it that is structural rather than defensive: explorers are spawned with `--tools read,grep,find,ls`, so an explorer has no shell whose output could promote even if both other layers were removed. The `PI_FAST_EXPLORER_NESTED` check still runs first and still covers every tool.
 
 ## When not to use it
 
@@ -366,13 +397,13 @@ These were found while building it. They are trades, not bugs to be surprised by
 
 4. **Quote verification is indentation-insensitive, and looser still on comments.** The verifier trims each line and skips blank ones before comparing a quoted block against the file on disk. Models reflow indentation when quoting, and counting that as a hallucination would make the detector cry wolf on correct citations. A wrong line number is not a failure either — the content is searched for across the whole file, and `synthesize` rewrites the anchor to where the code actually is before the main agent sees the report. Fabricated and misattributed content does fail, and is marked on the block rather than removed. The known soft spot is comment-only quotes: a mutation sweep of 49,985 injected edits leaked 0.364%, every one of them an all-comment quote where deleting a word still leaves a contiguous verbatim run. On quotes containing code, 43,777 mutations were injected and none escaped. Trust a code excerpt's verification more than a prose one's.
 
-5. **Spill files are never deleted.** Auto-promotion writes the raw grep/find text to the per-user temp directory with mode `0600` and leaves it there, because the model may still want to read it at any later point in the session. The OS reaps the temp directory eventually, but a long session leaves a trail of `fx-matches-*.txt`.
+5. **Spill files are never deleted.** Auto-promotion writes the raw search text to the per-user temp directory with mode `0600` and leaves it there, because the model may still want to read it at any later point in the session. The OS reaps the temp directory eventually, but a long session leaves a trail of `fx-matches-*.txt`.
 
 6. **In headless mode, config warnings are invisible.** `ctx.ui.notify` is a no-op stub when there is no UI (`--mode json`, `-p`), so an invalid `fast-explorer.json` is ignored *silently* in exactly the contexts — scripts, CI — where nobody is watching the terminal anyway. The config still fails safe (previous values are kept); you just will not be told.
 
 7. **Per-category cost fields are zero.** Only `cost.total` is available per explorer, so the aggregated usage reports a total but leaves the input/output/cache cost split at zero. Token counts are broken out correctly; cost breakdowns attribute all explorer spend to the total.
 
-8. **Auto-promotion has never run against a real model.** Explorers themselves have now been exercised heavily — the two benchmark sweeps have put 90 real exploration runs against `openai/gpt-5.6-luna` through spawn, streaming, the citation contract, re-anchoring and synthesis. What that did *not* cover is the `tool_result` hook path: no real `grep` has ever tripped the promotion gates, had its matches bucketed, spawned explorers and had its result replaced. Every gate and helper on that path is unit-tested (313 tests, including a stub subprocess emitting recorded pi JSON events, and a test that keeps `prompts/explorer.md` in sync with the citation parsers), and the pieces downstream of it are benchmarked, but the seam between them is untested end to end. The `explore` tool has the evidence; auto-promotion has the unit tests.
+8. **Auto-promotion has run end to end exactly once per path, and is not benchmarked.** The seam is no longer untested: a real `openai/gpt-5.6-luna` session on pi's *default* toolbelt, in `~/claude-plus-plus`, chose `bash: rg -n --hidden --glob '!node_modules' 'tool_use_id' src/`, and the hook promoted it — 105 files, four explorers over `src/utils`, `src/hooks`, `src/tools/AgentTool` and `src/remote`, 311 raw match lines replaced by cited findings, $0.129 and 13.3k output tokens reported back into session totals. What that run does *not* establish is quality: nobody has scored a promoted result the way the benchmark scores `explore`. It also did not save context — the four reports came to 29,626 bytes against 26,401 bytes of raw match list, so on a sweep this wide the win is that the main agent gets analysed, cited findings instead of a match list, not that it gets fewer tokens. The narrow reading is the safe one: the path works, the gates fire, the cost is reported, and how *good* the result is remains unmeasured.
 
 9. **Brief file lists are capped at 40 paths per explorer.** A `find` sweep can return up to 1000 paths, and pasting hundreds of them into a prompt recreates inside the subprocess exactly the context bloat this extension exists to remove. When the cap bites, the explorer is told how many paths were withheld, so it reports on a sample knowingly rather than mistaking its slice for the whole set.
 
@@ -386,14 +417,16 @@ These were found while building it. They are trades, not bugs to be surprised by
 
 14. **The turn budget is advisory.** pi exposes no turn-limit flag, so `maxTurnsPerExplorer` is a sentence in the task text, not a mechanism. Explorers exceed it — 7 of 40 benchmark runs went over the then-default budget of 5 — and the only hard stops are `timeoutMs` and the model's own context limit. Do not treat it as a bound on cost or latency.
 
-15. **It does not make the main agent faster.** Every configuration measured was slower than plain pi: 1.16x for one explorer and 1.36x for four in the first sweep, with the baseline ahead on all four questions; 1.08x for both in the second sweep, with the baseline ahead on four of five. The design once treated speed as a hard requirement; it was tested and it failed, and the goal has been retired rather than restated more weakly. The win is context, recall and verifiable citations, and it is bought with latency and cost. See [What it trades](#what-it-trades).
+15. **On Windows, shell searches are not promoted.** pi swaps `bash` for `powershell` there, and `powershell` is not in the trigger set. Adding it would be a two-line change to `sweepKind`, but `Select-String`'s output shape has not been checked against the parser on a real Windows box and a trigger nobody has run is worse than an admitted gap. `grep` and `find` promote normally on every platform.
+
+16. **It does not make the main agent faster.** Every configuration measured was slower than plain pi: 1.16x for one explorer and 1.36x for four in the first sweep, with the baseline ahead on all four questions; 1.08x for both in the second sweep, with the baseline ahead on four of five. The design once treated speed as a hard requirement; it was tested and it failed, and the goal has been retired rather than restated more weakly. The win is context, recall and verifiable citations, and it is bought with latency and cost. See [What it trades](#what-it-trades).
 
 ## Development
 
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (313 tests)
+npm test             # vitest (345 tests)
 npm run typecheck:tests
 npm run bench        # real model calls — see Benchmark, not part of npm test
 ```

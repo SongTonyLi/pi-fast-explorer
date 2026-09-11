@@ -2,6 +2,16 @@ import { readFileSync } from "node:fs";
 
 export interface AutoPromoteConfig {
 	enabled: boolean;
+	/**
+	 * Whether `bash` results that parse as search output are promoted too.
+	 *
+	 * Separate from `enabled` because the risk profile is different, not because
+	 * the feature is. A `grep` result is a search by construction; a `bash` result
+	 * is whatever the model ran, so promoting it rests on gates that infer intent
+	 * from output shape (see detect.ts). Anyone who trusts the first and not the
+	 * second needs a switch that says exactly that.
+	 */
+	bash: boolean;
 	minFiles: number;
 	minMatches: number;
 }
@@ -41,7 +51,7 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	 */
 	maxTurnsPerExplorer: 8,
 	minTotalBytes: 51200,
-	autoPromote: { enabled: true, minFiles: 15, minMatches: 60 },
+	autoPromote: { enabled: true, bash: true, minFiles: 15, minMatches: 60 },
 	timeoutMs: 120000,
 };
 
@@ -91,6 +101,9 @@ function validateAutoPromote(source: string, value: unknown): Partial<AutoPromot
 		if (key === "enabled") {
 			if (typeof v !== "boolean") throw typeError(source, "autoPromote.enabled", "a boolean", v);
 			out.enabled = v;
+		} else if (key === "bash") {
+			if (typeof v !== "boolean") throw typeError(source, "autoPromote.bash", "a boolean", v);
+			out.bash = v;
 		} else if (key === "minFiles" || key === "minMatches") {
 			if (typeof v !== "number" || !Number.isFinite(v)) {
 				throw typeError(source, `autoPromote.${key}`, "a finite number", v);

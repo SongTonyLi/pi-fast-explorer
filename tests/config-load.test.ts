@@ -82,7 +82,7 @@ describe("loadConfigFrom", () => {
 		writeProject(JSON.stringify({ autoPromote: { minMatches: 7 } }));
 		const result = loadConfigFrom(userPath, projectPath, true);
 		expect(result.error).toBeUndefined();
-		expect(result.config.autoPromote).toEqual({ enabled: true, minFiles: 5, minMatches: 7 });
+		expect(result.config.autoPromote).toEqual({ enabled: true, bash: true, minFiles: 5, minMatches: 7 });
 	});
 
 	it("preserves the previous config and reports malformed JSON rather than throwing", () => {

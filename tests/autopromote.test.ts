@@ -122,7 +122,7 @@ describe("describeScope", () => {
 
 describe("buildSweepBrief", () => {
 	it("leans on the pattern for grep, because a regex carries real intent", () => {
-		const brief = buildSweepBrief(true, "parseConfig", "under `src`", 20, ["src/a.ts"]);
+		const brief = buildSweepBrief("grep", "parseConfig", "under `src`", 20, ["src/a.ts"]);
 		expect(brief).toContain("parseConfig");
 		expect(brief).toContain("under `src`");
 		expect(brief).toContain("- src/a.ts");
@@ -131,14 +131,14 @@ describe("buildSweepBrief", () => {
 	// A glob says only "these are .ts files". Phrasing find's brief like grep's
 	// invites the explorer to invent a purpose that was never in the request.
 	it("does not ask find's explorer to infer an intent from a glob", () => {
-		const brief = buildSweepBrief(false, "**/*.test.ts", "", 30, ["a.test.ts"]);
+		const brief = buildSweepBrief("find", "**/*.test.ts", "", 30, ["a.test.ts"]);
 		expect(brief).toContain("**/*.test.ts");
 		expect(brief).toMatch(/carries no intent|do not guess/i);
 	});
 
 	it("lists every file when the bucket fits under the cap", () => {
 		const bucket = ["a.ts", "b.ts", "c.ts"];
-		const brief = buildSweepBrief(true, "x", "", 3, bucket);
+		const brief = buildSweepBrief("grep", "x", "", 3, bucket);
 		for (const f of bucket) expect(brief).toContain(`- ${f}`);
 		expect(brief).not.toMatch(/not listed/);
 	});
@@ -147,7 +147,7 @@ describe("buildSweepBrief", () => {
 	// believing it held the whole set — the failure "Not Covered" exists to stop.
 	it("caps the list and says how many it withheld", () => {
 		const bucket = Array.from({ length: MAX_FILES_PER_BRIEF + 15 }, (_, i) => `f${i}.ts`);
-		const brief = buildSweepBrief(true, "x", "", bucket.length, bucket);
+		const brief = buildSweepBrief("grep", "x", "", bucket.length, bucket);
 		const listed = brief.split("\n").filter((l) => l.startsWith("- "));
 		expect(listed).toHaveLength(MAX_FILES_PER_BRIEF);
 		expect(brief).toContain("15 more not listed");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseFindOutput, parseGrepOutput } from "../src/parse.js";
+import { parseFindOutput, parseGrepMatches, parseGrepOutput } from "../src/parse.js";
 
 describe("parseGrepOutput", () => {
 	it("extracts distinct files and counts matches", () => {
@@ -26,6 +26,41 @@ describe("parseGrepOutput", () => {
 
 	it("returns empty for empty input", () => {
 		expect(parseGrepOutput("")).toEqual({ files: [], matchCount: 0 });
+	});
+});
+
+describe("parseGrepMatches", () => {
+	it("keeps the line number and the matched text", () => {
+		expect(parseGrepMatches("src/a.ts:10: const x = 1;")).toEqual([
+			{ file: "src/a.ts", line: 10, text: "const x = 1;" },
+		]);
+	});
+
+	// `grep -n`, `rg` and `git grep -n` omit the space pi's own grep inserts.
+	// Nothing parsed this shape before, which is why a model searching with the
+	// shell was invisible to auto-promotion.
+	it("parses the spaceless shape bash search tools emit", () => {
+		expect(parseGrepMatches("src/a.ts:10:const x = 1;")).toEqual([
+			{ file: "src/a.ts", line: 10, text: "const x = 1;" },
+		]);
+	});
+
+	it("keeps leading indentation out of the file name and inside the text", () => {
+		expect(parseGrepMatches("src/a.ts:10:\t\tconst x = 1;")).toEqual([
+			{ file: "src/a.ts", line: 10, text: "\t\tconst x = 1;" },
+		]);
+	});
+
+	// The strict form is tried first so a path containing `:<digits>:` still wins
+	// the way it always did. Relaxing that order would silently truncate paths.
+	it("still prefers the strict shape when both could match", () => {
+		expect(parseGrepMatches("a:1:b.ts:5: text")).toEqual([
+			{ file: "a:1:b.ts", line: 5, text: "text" },
+		]);
+	});
+
+	it("ignores lines with no line number at all", () => {
+		expect(parseGrepMatches("src/a.ts:const x = 1;\nBinary file src/b.bin matches")).toEqual([]);
 	});
 });
 

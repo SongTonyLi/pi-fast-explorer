@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -8,11 +8,13 @@ import {
 	type ExtensionAPI,
 	type ToolResultEvent,
 	getAgentDir,
+	isBashToolResult,
 	isFindToolResult,
 	isGrepToolResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type FastExplorerConfig, type PartialConfig, loadConfigFrom, resolveConfig } from "./config.js";
+import { looksLikeSearchOutput } from "./detect.js";
 import {
 	type ExplorerResult,
 	NESTED_ENV_VAR,
@@ -20,7 +22,7 @@ import {
 	runExplorer,
 	runWithConcurrency,
 } from "./explorer.js";
-import { parseFindOutput, parseGrepOutput } from "./parse.js";
+import { parseFindOutput, parseGrepMatches, parseGrepOutput, summarizeMatches } from "./parse.js";
 import { bucketByDirectory, computeFanout, shouldExplore } from "./partition.js";
 import { synthesize } from "./synthesis.js";
 
@@ -219,6 +221,43 @@ export function isNestedExplorer(env: NodeJS.ProcessEnv = process.env): boolean 
 	return Boolean(env[NESTED_ENV_VAR]);
 }
 
+/** How many promoted bash outputs are remembered. Bounded, newest last. */
+const PROMOTED_MEMORY = 32;
+const promotedOutputs: string[] = [];
+
+/**
+ * Records a bash output as promoted, returning false if it already was.
+ *
+ * This closes a loop the bash trigger opens and the grep trigger cannot. Every
+ * promotion tells the model "Raw command output saved to: /tmp/fx-matches-….txt"
+ * — an invitation to go and read it, and with bash on the toolbelt the model
+ * reads it by running `cat`. That `cat` returns the match list verbatim, which
+ * parses as a search, resolves against disk and verifies line for line: a
+ * perfect promotion candidate. Left alone, every attempt to recover the raw
+ * output would spend another fan-out and return findings instead, and the model
+ * would never get the thing it asked for.
+ *
+ * It is not a fork bomb — each round is one model turn and the concurrency
+ * ceiling still holds — but it is an unbounded spend triggered by following our
+ * own advice, which is worse than it sounds.
+ *
+ * Deliberately bash-only. A model repeating the same grep twice is repeating a
+ * search and should be promoted twice; a model reading back a spill file is not
+ * searching at all.
+ */
+export function claimOutput(text: string): boolean {
+	const key = createHash("sha256").update(text.trim()).digest("hex");
+	if (promotedOutputs.includes(key)) return false;
+	promotedOutputs.push(key);
+	if (promotedOutputs.length > PROMOTED_MEMORY) promotedOutputs.shift();
+	return true;
+}
+
+/** Exposed for tests, which must not inherit each other's promotion history. */
+export function forgetPromotedOutputs(): void {
+	promotedOutputs.length = 0;
+}
+
 /**
  * grep and find both emit paths relative to their own search root, not to the
  * session cwd (core/tools/grep.js formatPath, core/tools/find.js
@@ -262,20 +301,47 @@ export function describeScope(searchDir: string, glob: unknown): string {
 	return parts.join(", ");
 }
 
+/** Which tool result a sweep came from. Decides the brief and the spill note. */
+export type SweepKind = "grep" | "find" | "bash";
+
 /**
- * Briefs are phrased per tool because the two inputs carry very different
+ * Ceiling on the intent string inlined into a brief.
+ *
+ * Only `bash` can get near it. A grep pattern is short by nature; a shell
+ * command can be a three-line pipeline with a heredoc in it, and pasting that
+ * verbatim into every explorer prompt spends context on quoting rather than on
+ * intent.
+ */
+export const MAX_INTENT_CHARS = 200;
+
+/** Collapses a command to one line and caps it, for inlining into a brief. */
+export function summarizeIntent(intent: string): string {
+	const flat = intent.replace(/\s+/g, " ").trim();
+	return flat.length > MAX_INTENT_CHARS ? `${flat.slice(0, MAX_INTENT_CHARS)}…` : flat;
+}
+
+/**
+ * Briefs are phrased per source because the three inputs carry very different
  * amounts of intent. A grep pattern is a real signal — someone was looking for
  * that specific thing — so the brief leans on it. A find glob says only "these
  * are .ts files", so leaning on it invites the explorer to invent a purpose that
  * was never there; that brief asks what the files *are* instead.
+ *
+ * `bash` gets the command, because the command is all there is: pi's bash tool
+ * takes `{ command, timeout }` and no structured pattern. That turns out to be
+ * the richest of the three — `rg -n --glob '!node_modules' 'tool_use_id' src/`
+ * states the pattern, the exclusions and the scope in one string — but it is
+ * also the only one an explorer might misread as an instruction to run, which it
+ * cannot do and must not try. The wording therefore says what the command was
+ * *for* rather than quoting it as a thing to do.
  *
  * The file list is capped, and the cap is disclosed. An explorer handed a silent
  * truncation would report on a sample while believing it had the whole set,
  * which is the same failure mode the "Not Covered" contract exists to prevent.
  */
 export function buildSweepBrief(
-	isGrep: boolean,
-	pattern: string,
+	kind: SweepKind,
+	intent: string,
 	scope: string,
 	totalFiles: number,
 	bucket: string[],
@@ -284,14 +350,22 @@ export function buildSweepBrief(
 	const omitted = bucket.length - shown.length;
 	const where = scope ? ` ${scope}` : "";
 
-	const header = isGrep
-		? `The main agent searched this repository for the pattern \`${pattern}\`${where} ` +
-			`and matched ${totalFiles} files. Investigate what that pattern is doing across ` +
-			`your share of them: what each site is for, how they relate, and what someone ` +
-			`would need to know before changing it.`
-		: `The main agent listed files matching the glob \`${pattern}\`${where} and got ` +
-			`${totalFiles} paths. A glob carries no intent, so do not guess at one — report ` +
-			`what these files are and what they do, grouped by what they have in common.`;
+	const header =
+		kind === "grep"
+			? `The main agent searched this repository for the pattern \`${intent}\`${where} ` +
+				`and matched ${totalFiles} files. Investigate what that pattern is doing across ` +
+				`your share of them: what each site is for, how they relate, and what someone ` +
+				`would need to know before changing it.`
+			: kind === "find"
+				? `The main agent listed files matching the glob \`${intent}\`${where} and got ` +
+					`${totalFiles} paths. A glob carries no intent, so do not guess at one — report ` +
+					`what these files are and what they do, grouped by what they have in common.`
+				: `The main agent searched this repository by running the shell command ` +
+					`\`${summarizeIntent(intent)}\`${where}, which matched ${totalFiles} files. That ` +
+					`command is the only statement of intent you get: read it for what was being ` +
+					`looked for, and do not run it or anything else. Investigate what it found across ` +
+					`your share of those files: what each site is for, how they relate, and what ` +
+					`someone would need to know before changing it.`;
 
 	const listHeader =
 		omitted > 0
@@ -342,8 +416,34 @@ export interface SweepContext {
 }
 
 /**
- * Builds the `tool_result` handler that turns an oversized grep or find into
- * cited findings.
+ * Which of the three promotable tools produced this result, if any.
+ *
+ * `event.toolName === "grep"` cannot narrow the union, because
+ * CustomToolResultEvent declares `toolName: string` and so overlaps every string
+ * literal. pi ships these guards for exactly that reason.
+ *
+ * `bash` is here because the trigger set was measured being bypassed. Asked
+ * explicitly to "use the grep tool", pi with its default toolbelt ran
+ * `bash: grep -RIn -- "tool_use_id" src/` instead, and the hook never fired. The
+ * same session restricted to `--tools read,grep,find,ls` promoted correctly, so
+ * the machinery was right and only the trigger was too narrow. Models reach for
+ * the shell; a hook that only watches the structured tools watches the path they
+ * do not take.
+ *
+ * Only model-initiated bash arrives here. A command the *user* typed at the
+ * prompt goes through pi's `user_bash` event, which this extension does not
+ * register for, so nothing a human ran by hand can have its output replaced.
+ */
+function sweepKind(event: ToolResultEvent): SweepKind | null {
+	if (isGrepToolResult(event)) return "grep";
+	if (isFindToolResult(event)) return "find";
+	if (isBashToolResult(event)) return "bash";
+	return null;
+}
+
+/**
+ * Builds the `tool_result` handler that turns an oversized search into cited
+ * findings, whether it arrived as `grep`, `find`, or a shell command.
  *
  * Takes a config *getter* rather than a config, because the extension reloads
  * its config on every session_start and a captured snapshot would go stale.
@@ -357,29 +457,48 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 	return async (event: ToolResultEvent, ctx: SweepContext) => {
 		// Fork-bomb guard, layer two. Must be the very first check: everything
 		// below this line spawns processes. An explorer's own greps must never
-		// promote, or each one spawns a fresh wave that does the same.
+		// promote, or each one spawns a fresh wave that does the same. Adding bash
+		// to the trigger set does not widen this: explorers are spawned with
+		// `--tools read,grep,find,ls`, so an explorer has no bash whose output
+		// could promote, and this guard fires before that even comes up.
 		if (isNestedExplorer()) return undefined;
 
-		// `event.toolName === "grep"` cannot narrow the union, because
-		// CustomToolResultEvent declares `toolName: string` and so overlaps every
-		// string literal. pi ships these guards for exactly that reason.
-		const grep = isGrepToolResult(event);
-		if (!grep && !isFindToolResult(event)) return undefined;
+		const kind = sweepKind(event);
+		if (!kind) return undefined;
 		if (event.isError) return undefined;
 
 		const cfg = getConfig();
+		if (kind === "bash" && !cfg.autoPromote.bash) return undefined;
+
 		const text = event.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map((c) => c.text)
 			.join("\n");
 
-		const parsed = grep ? parseGrepOutput(text) : { files: parseFindOutput(text), matchCount: 0 };
+		// Only bash needs the rows themselves; grep and find are searches by
+		// construction and are summarized exactly as they always were.
+		const matches = kind === "bash" ? parseGrepMatches(text) : [];
+		const parsed =
+			kind === "grep"
+				? parseGrepOutput(text)
+				: kind === "find"
+					? { files: parseFindOutput(text), matchCount: 0 }
+					: summarizeMatches(matches);
 		if (!shouldAutoPromote(parsed.files, parsed.matchCount, cfg)) return undefined;
 
+		// bash has no `path` argument, and none is wanted: it runs in the session
+		// cwd and prints paths relative to it, so the search root is already cwd.
 		const searchDir = typeof event.input.path === "string" ? event.input.path : ".";
 		const files = normalizeMatchPaths(parsed.files, ctx.cwd, searchDir);
 		if (!shouldExplore(measureBytes(files, ctx.cwd, cfg.minTotalBytes), cfg).explore) {
 			return undefined;
+		}
+
+		// Last, because it reads files: the cheap gates have already rejected
+		// everything that was never going to be worth the read.
+		if (kind === "bash") {
+			if (!looksLikeSearchOutput(matches, ctx.cwd)) return undefined;
+			if (!claimOutput(text)) return undefined;
 		}
 
 		// randomUUID, not toolCallId: Gemini synthesizes tool call ids as
@@ -401,7 +520,9 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		const buckets = bucketByDirectory(files, computeFanout(files.length, cfg.maxFanout));
 		const model = cfg.model ?? ctx.model?.id ?? null;
 		const scope = describeScope(searchDir, event.input.glob);
-		const pattern = typeof event.input.pattern === "string" ? event.input.pattern : "";
+		// grep and find state their intent in `pattern`; bash has only `command`.
+		const intentKey = kind === "bash" ? "command" : "pattern";
+		const intent = typeof event.input[intentKey] === "string" ? event.input[intentKey] : "";
 
 		const tasks = buckets.map((bucket) => () =>
 			withExplorerSlot(cfg.concurrency, () =>
@@ -411,7 +532,7 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 						cfg,
 						model,
 						PROMPT_PATH,
-						buildSweepBrief(grep, pattern, scope, files.length, bucket),
+						buildSweepBrief(kind, intent, scope, files.length, bucket),
 					),
 					brief: `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`,
 					cfg,
@@ -424,7 +545,7 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		const results = await runWithConcurrency(tasks, cfg.concurrency);
 
 		const spillNote = spilled
-			? `Raw ${grep ? "grep" : "find"} output (${files.length} files) saved to: ${spillPath}`
+			? `Raw ${kind === "bash" ? "command" : kind} output (${files.length} files) saved to: ${spillPath}`
 			: `${files.length} files matched. Raw output could not be saved to disk.`;
 
 		return {
@@ -433,7 +554,8 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 			],
 			// This REPLACES the tool's usage rather than adding to it
 			// (core/agent-session.js: `usage: hookResult?.usage`). Safe only because
-			// grep and find report no usage of their own. Reporting it is not
+			// none of grep, find and bash report usage of their own — all three
+			// return `{ content, details }` and nothing else. Reporting it is not
 			// optional: a feature that silently spawns LLM subprocesses must not
 			// hide their cost from session totals.
 			usage: aggregateUsage(results),
@@ -537,7 +659,10 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 
 	// Path B: intercept sweeps the model did not know were sweeps. This matters
 	// more in practice than the explore tool, because the common failure is the
-	// model not anticipating that a grep would span the whole repository.
+	// model not anticipating that a grep would span the whole repository — and
+	// that is also why the hook watches `bash`. A trigger set of grep and find
+	// alone was measured missing the case it exists for, because the model
+	// searched with the shell.
 	//
 	// `cfg` is read through a getter, not captured, so a session_start reload
 	// takes effect without re-registering the handler.
