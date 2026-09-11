@@ -5,10 +5,17 @@
 **Package:** `pi-fast-explorer`
 
 Amendments are marked in place and dated rather than folded in silently, so a reader
-can tell which parts of this document were designed and which were measured. Four are
+can tell which parts of this document were designed and which were measured. Five are
 large enough to name here, and the first two went against the design:
 
 - The speed goal was falsified — see "Retired goal: speed (2026-09-11)".
+- **The benchmark was measuring its own execution order, and every latency ratio this
+  document published was too kind.** The arms ran in per-question blocks with the
+  baseline always last. Interleaved, the explorer costs **+9.0 s per sweep** on the
+  paired mean and loses **14 of 15** paired runs, against +6.4 s and 11 of 15 at the
+  same config blocked. The retirement of the speed goal is unaffected; its numbers are
+  replaced. See "Amendment (2026-09-11): the latency figures were measuring execution
+  order".
 - The parallelism argument lost on the one question built to test it. Fan-out is no
   longer recommended anywhere in the shipped text — see "Open question: is fan-out
   ever worth it?".
@@ -338,8 +345,19 @@ widening the fan-out. Every lever below follows from that.
 
 This analysis survived measurement; the conclusion drawn from it did not. Fan-out
 was measured at 3.0–3.3x speedup against sequential execution of the same four
-explorers — near the ceiling of 4 — and was still 1.36x slower end to end than the
-unaided baseline, exactly as the relationship above predicts.
+explorers — near the ceiling of 4 — and was still slower end to end than the unaided
+baseline, exactly as the relationship above predicts: **+9,428 ms on the paired mean,
+slower in 14 of 15 paired runs** (`pairedLatency[(pooled), fanout]` in
+`bench/results/2026-09-11T09-12-16.json`). This paragraph said "1.36x slower" until
+2026-09-11; that ratio came from the blocked arm order and is withdrawn.
+
+The relationship also predicts something the first sweep got wrong. Since parallelism
+does not reduce the turns inside any one explorer, four explorers should cost roughly
+what one costs in wall-clock and four times as much in money — and interleaved, that
+is exactly what happens. Fan-out against one explorer is **+414 ms on the paired mean,
+median ratio 0.994, slower in 7 of 15** — a wash — at **3.5x** the spend. The first
+sweep's "1.17x slower" was the blocked order again, since the explorer block always
+preceded the fan-out block.
 
 ### Levers, in order of impact
 
@@ -403,18 +421,45 @@ acceptance criterion for it: *`explore` over a ~40-file sweep completes in no mo
 wall-clock than the unaided main agent performing the same sweep*. There was a third
 criterion too, on time-to-first-token over the ten turns after a sweep.
 
-The first was measured on 2026-09-11 and **failed**. Corpus `~/claude-plus-plus`,
-model `openai/gpt-5.6-luna`, 4 questions × 5 runs × 3 arms, recorded in
-`bench/results/2026-09-11T04-37-10.json`:
+The first was measured on 2026-09-11 and **failed**. It was re-measured later the same
+day on a corrected harness and it failed by more. The current figures, from
+`bench/results/2026-09-11T09-12-16.json` — corpus `~/claude-plus-plus`, model
+`openai/gpt-5.6-luna`, 5 questions × 3 runs × 3 arms, arms interleaved:
 
-| arm | median latency | vs baseline | cost/run |
+| subject vs baseline | paired mean delta | runs the subject lost | paired median ratio |
 |---|---|---|---|
-| baseline (plain pi) | 13,983 ms | — | $0.0122 |
-| explorer (one) | 16,276 ms | 1.16x slower | $0.0176 |
-| fanout (four) | 19,051 ms | 1.36x slower | $0.0629 |
+| explorer (one) | **+9,015 ms** | **14 / 15** | 1.458 |
+| fanout (four) | +9,428 ms | 14 / 15 | 1.552 |
 
-The baseline was faster on every question in every configuration — not a marginal
-loss on the aggregate, a clean sweep. The guard rails were not wrong and moving the
+Fields: `pairedLatency[(pooled), <arm>].meanDeltaMs`, `.subjectSlower` / `.pairs`,
+`.ratio.median`. Per-question, the explorer's mean delta runs from +2,634 ms
+(`persistence`) to +22,115 ms (`bash-approval`), and the baseline is ahead at the
+median on all five.
+
+The penalty is **per turn, not per run**. Pooled medians of
+`records[].elapsedMs / records[].turns`: explorer **5,045 ms/turn** against the
+baseline's **3,744 ms/turn**, at near-identical turn counts (mean 5.13 vs 4.93). The
+explorer prompt asks for ten concurrent searches and a structured, cited report; that
+is a protocol cost. It is also the most reproducible number here — 4,925 / 5,004 /
+5,045 ms/turn across the three sweeps run at 5 questions and cap 8, a 2.4% spread,
+while the same sweeps' explorer totals span 34%. The baseline's per-turn figure is not
+that stable (4,043 / 4,949 / 3,744, a 32% spread), so the two absolute figures are
+worth publishing and their ratio is not worth treating as a constant.
+
+**The original version of this table is superseded and its ratios are withdrawn.** It
+read, from the first sweep (`2026-09-11T04-37-10.json`, 4 questions × 5 runs):
+baseline 13,983 ms, explorer 16,276 ms at "1.16x slower", fanout 19,051 ms at "1.36x
+slower", costing $0.0122 / $0.0176 / $0.0629 per run. The absolute medians and the
+costs are what that sweep measured and stand as such; the two ratios do not, because
+that sweep ran the arms in per-question blocks with the baseline always last. See the
+amendment below.
+
+The baseline was faster on every question of that sweep in both explorer
+configurations — not a marginal loss on the aggregate, a clean sweep — and that part
+replicated exactly on all five questions once the arms were interleaved. (Across all
+six sweeps there is one question-level exception, `tracking` in the blocked second
+sweep, noted under "Re-measured in the second sweep" below.) The guard rails were not
+wrong and moving the
 thresholds would not have helped: the concurrency pool measured 3.0–3.3x against
 sequential execution of the same four explorers, against a ceiling of 4, and the
 remaining gap is per-explorer fixed overhead plus the turns × latency relationship
@@ -435,18 +480,102 @@ What this changes:
   justification". It is now the only justification, and the honest framing is a
   trade with a losing side, not a win.
 - The levers under "Levers, in order of impact" stay. They were never about beating
-  the baseline; they are about how much the extension costs, and 1.16x is the number
-  they bought.
+  the baseline; they are about how much the extension costs, and +9.0 s per sweep is
+  the number they bought. (This bullet said "1.16x" until 2026-09-11.)
 
 The context claim, which was the secondary argument, held by 20.3–35.7x — a much
 wider margin than the 5x the criterion asked for. The benchmark therefore falsified
 the headline and confirmed the footnote, which is an argument for keeping both in a
-spec rather than only the one that sounds better.
+spec rather than only the one that sounds better. It is also why context stays the
+headline after this correction: a 13–41x effect clears the noise floor by an order of
+magnitude, and latency does not.
 
-**Re-measured in the second sweep**, at the current defaults and over 5 questions:
-1.08x slower for one explorer and 1.08x for four (24,256 ms baseline, 26,117 ms and
-26,116 ms), with the baseline ahead on four questions of five. The gap narrowed; it
-did not close, and the retired goal stays retired.
+**Re-measured in the second sweep**, at the current defaults and over 5 questions: the
+baseline was ahead on four questions of five, at 24,256 ms against 26,117 ms and
+26,116 ms. That was published as "1.08x slower for one explorer and 1.08x for four",
+and those ratios are withdrawn with the rest — the second sweep was blocked too, and
+it produced the *kindest* ratio of the five, which is exactly the pattern the
+amendment below explains. The retired goal stays retired either way.
+
+The fifth question of five was `tracking`, where the explorer's median was 22,648 ms
+against the baseline's 27,706 ms and fan-out's was 26,116 ms. **That is the only
+question-level win either explorer arm has recorded in six sweeps**, and it is
+recorded here rather than dropped. It did not survive interleaving — `tracking` is
++3,939 ms with 2 of 3 pairs lost in `09-12-16`. The likelier explanation is the
+control arm rather than the extension: the baseline's own median on `tracking` reads
+27,706 ms in that sweep and 19,949 ms in the interleaved one at the same settings, a
+swing of 7,757 ms on the control alone — larger than the 5,058 ms "win" it produced.
+
+#### Amendment (2026-09-11): the latency figures were measuring execution order
+
+**Every latency ratio this document published before this date came from a harness
+confounded by execution order, and all of them understated the cost.**
+
+The benchmark ran the arms in per-question blocks — every explorer run, then every
+fan-out run, then every baseline run. The baseline was therefore systematically the
+last arm measured for each question, and the headline statistic was explorer over
+baseline. Anything that made later runs slower inflated the denominator and flattered
+the extension. Reconstructing arm start times by summing `records[].elapsedMs` in
+array order, the baseline block in `2026-09-11T08-02-02.json` began on average
+**171.8 s** later in the sweep than the explorer block. (`bench/run.ts`'s
+`FINDINGS["turn-budget-not-a-latency-lever"]` reports 169 s for the same sweep; it
+measured to each run's midpoint where `startOffsetMs` measures to its start. Nothing
+turns on the convention.)
+
+Commit `7c220f5` interleaves the arms run-by-run, rotating the order by run and
+question. Rotation rather than a shuffle, because at three runs per question a fair
+shuffle puts the baseline last in all three about one time in 27; rotation balances
+mean position exactly rather than in expectation. Every record now carries `slot` and
+`startOffsetMs`, so position is a stored field instead of a reconstruction. The mean
+arm start-offset gap fell from ~172 s to **6.3 s**
+(`executionOrder.meanOffsetGapToBaselineMs.explorer` = 6,348 ms), and
+`executionOrder.balance[].meanSlot` is 22 for all three arms — exactly equal.
+
+Same config, same corpus, same model, same cap of 8, three runs per question. Only the
+ordering changed:
+
+| statistic | blocked (`08-02-02`) | interleaved (`09-12-16`) |
+|---|---|---|
+| paired mean delta, explorer vs baseline | +6,385 ms | **+9,015 ms** |
+| runs where the explorer was slower | 11 / 15 | **14 / 15** |
+| paired median ratio | 1.337 | **1.458** |
+| mean arm start-offset gap to baseline | ~171,800 ms | **6,348 ms** |
+
+**What is established.** That the blocked design left execution order free to explain
+the ratio. A confound does not have to be shown to be active to invalidate a
+measurement — it has to be possible and uncontrolled, and this one was both. That is
+enough to discard every pre-interleaving ratio, and the artifact says so in
+`comparability.note`: *"Treat every pre-interleaving ratio as uninterpretable rather
+than merely noisy."*
+
+**What is not established: that latency actually drifts upward during a sweep.** The
+evidence once offered for drift was that block separation rank-orders the reported
+ratio across the five blocked sweeps (Spearman −1.0, Pearson −0.85). That correlation
+is **circular**: the block gap was itself computed by summing the same `elapsedMs`
+values that form the ratio's numerator and denominator, so both sides share their
+inputs. The non-circular test is the within-block slope of `elapsedMs` against run
+index, pooled over every `(question, arm)` block, and it does not survive: **+360,
+−837, +71, +781, +979 ms per position** across the five blocked sweeps. It changes
+sign. Drift is a plausible mechanism with no clean evidence behind it, and nothing in
+this amendment depends on it being real.
+
+**The fix carries its own possible bias.** Interleaving widens the spacing between
+consecutive runs of the same arm — median 30.8 s → 72.2 s for the explorer, 25.9 s →
+60.5 s for the baseline. If the provider caches prompt prefixes, wider spacing costs
+cache locality, and the explorer carries the larger cached prefix (its own system
+prompt plus `prompts/explorer.md`), so it has more to lose. Some unknown part of the
+1.337 → 1.458 move could be that rather than bias removal. Assessed as small — 60–90 s
+sits well inside plausible cache TTLs, and the spacing widened by the same factor
+(2.3x) for both arms — but not zero, and not separable from this data. It would need a
+third design, not another run of this one.
+
+**The methodology finding is worth more than the number it corrected.** Five sweeps
+agreed on the sign of the result, were internally consistent, and were quoted against
+each other in this document as if they were comparable. A sixth measurement of the same
+quantity moved the mean delta by 41%. Cross-run consistency is evidence that a harness
+is deterministic; it is not evidence that the harness is measuring the quantity named
+in the column header. Nothing in the design was wrong here — the measurement was, and
+it took five agreeing runs to notice.
 
 ### Open question: is fan-out ever worth it?
 
@@ -458,10 +587,15 @@ Fan-out is the configuration this design argues for most strongly, and it is the
 with the worst evidence.
 
 The first sweep (`bench/results/2026-09-11T04-37-10.json`) measured four explorers on
-a single question costing 3.6x as much as one ($0.0629 vs $0.0176 per run), running
-1.17x slower, matching the single explorer's recall exactly on every question both
+a single question costing 3.6x as much as one ($0.0629 vs $0.0176 per run), matching
+the single explorer's recall exactly on every question both
 arms scored (median 1.00), with consistently worse precision because four explorers
-cite more files and dilute the ones that matter. But every question in that sweep was
+cite more files and dilute the ones that matter. (That sentence also said "running
+1.17x slower". It is withdrawn: the arms were blocked and the explorer block always
+preceded the fan-out block. Interleaved, fan-out is a wash against one explorer —
+paired mean delta +414 ms, median ratio 0.994, slower in 7 of 15 — and costs 3.5x.
+The case against `questions` is a cost-and-recall case, and removing the latency claim
+does not weaken it.) But every question in that sweep was
 **saturated by one explorer**, so the evidence was asymmetric: wasteful on saturated
 questions, nothing at all about separable ones. The path existed for the separable
 case and the separable case had not been tested.
@@ -483,9 +617,13 @@ format, so citation-based recall is not comparable across arms):
 
 | arm | recall | precision | median latency | cost/run |
 |---|---|---|---|---|
-| baseline (no extension) | **1.00** | 0.50 | **26,075 ms** | **$0.0296** |
-| explorer (one) | **1.00** | **0.625** | 32,916 ms | $0.0373 |
-| fanout (four) | **0.80** | 0.235 | 35,154 ms | $0.0872 |
+| baseline (no extension) | **1.00** | 0.50 | 26,075 ms † | **$0.0296** |
+| explorer (one) | **1.00** | **0.625** | 32,916 ms † | $0.0373 |
+| fanout (four) | **0.80** | 0.235 | 35,154 ms † | $0.0872 |
+
+† Blocked arm order, baseline measured last; do not derive a ratio from this column.
+Interleaved, `bash-approval` is the extension's worst question by a wide margin —
+paired mean delta **+22,115 ms**, explorer slower in 3 of 3 pairs, median ratio 1.967.
 
 Fan-out lost its own best case. It was the only arm below 1.00 recall in the median
 run, and it missed the same file —
@@ -627,14 +765,23 @@ surprises.
   makes behaviour harder to test and to trust. Measured on one question and arm,
   recall ranged 0.50–1.00 across five runs.
 - **Auto-promote false positives.** A grep the model intended as a quick existence
-  check becomes an exploration — measured at a 16.3s median for one explorer, not the
-  8s guessed here. Threshold tuning is real work and the defaults are still a
+  check becomes an exploration — measured at a **22.0 s** pooled median for one
+  explorer (`records[].elapsedMs`, explorer arm, `2026-09-11T09-12-16.json`), not the
+  8 s guessed here. (This read "16.3s" until 2026-09-11, from the first sweep, which
+  ran four easier questions at a lower turn cap. The two are not comparable and the
+  later one is the corpus the rest of this document now uses.) Threshold tuning is
+  real work and the defaults are still a
   starting guess: nothing in the benchmark exercises them, because the benchmark
   calls explorers directly rather than through the hook.
-- **It is slower than not using it.** Measured 1.16x for one explorer and 1.36x for
-  four in the first sweep, with the unaided baseline ahead on every question; 1.08x
-  for both in the second, with the baseline ahead on four of five. This was a goal
-  until 2026-09-11 and is now a limitation; see "Retired goal: speed (2026-09-11)".
+- **It is slower than not using it, by more than this document used to say.**
+  Interleaved, one explorer costs **+9,015 ms per sweep** on the paired mean and loses
+  **14 of 15** paired runs; four explorers cost +9,428 ms and lose 14 of 15. The
+  baseline is ahead at the median on all five questions. The mechanism is per-turn
+  cost: 5,045 ms/turn against 3,744, at near-equal turn counts. The figures this item
+  carried until 2026-09-11 — 1.16x and 1.36x from the first sweep, 1.08x from the
+  second — are **withdrawn**, not superseded: they came from blocked arm ordering with
+  the baseline always last. This was a goal until 2026-09-11 and is now a limitation;
+  see "Retired goal: speed (2026-09-11)" and its amendment.
 - **The parallelism argument was tested and it lost.** Fan-out is wasteful on
   saturated questions (3.6x the cost, identical recall) and, on the one separable
   question the corpus now contains, it cost 2.3x for *lower* recall than a single
@@ -656,7 +803,8 @@ Encoded as guard rails in the tool description and the auto-promote threshold:
 - Edit-heavy rather than search-heavy work
 - Interactive debugging where the agent needs to iterate on real output
 - Latency-sensitive work in a short session, where the context saving never has
-  enough turns to repay the 1.16x it costs up front
+  enough turns to repay the ~9 s per sweep it costs up front (this said "the 1.16x"
+  until 2026-09-11)
 
 ## Relationship to other designs
 
@@ -764,6 +912,8 @@ fell against fan-out.
 | Metric | Measurement | Kind |
 |---|---|---|
 | Wall-clock | end-to-end time for the sweep | speed |
+| **Paired per-run delta** | subject minus baseline on the same question and run index, averaged | speed — the statistic of record since 2026-09-11 |
+| **Per-turn wall-clock** | `elapsedMs / turns`, pooled median per arm | speed — where the penalty actually lives |
 | Main-agent context after | tokens in the main session post-sweep | context |
 | Subsequent TTFT | median time-to-first-token over the next 10 turns | speed |
 | **File recall** | `|cited ∩ truth| / |truth|` | quality |
@@ -848,17 +998,30 @@ signature this metric pair was built to catch, and it caught it.
   gitignored, which made every number in this spec and the README uncheckable from a
   clone. They are committed now, with the verbatim report text stripped — it quoted
   ~1 MB of a private corpus. Every published figure is a field that survives the strip.
+- **Interleave the arms.** Amended 2026-09-11: the suite ran them in per-question
+  blocks, which put the baseline last every time and made the latency comparison a
+  partial readout of execution order. Arms now rotate run-by-run, every record carries
+  `slot` and `startOffsetMs`, and `executionOrder.balance` reports the mean position of
+  each arm so the assumption behind the paired statistic is checkable rather than
+  asserted. See "Amendment (2026-09-11): the latency figures were measuring execution
+  order".
 - Gate on wide margins. The suite exists to catch regressions, not jitter.
 
 ### What the benchmark cannot tell you
 
 Recorded because these are the limits of every number this spec now quotes.
 
+- **Only an interleaved sweep can support a latency comparison.** The first four
+  sweeps blocked the arms with the baseline last, so their cross-arm latency ratios are
+  uninterpretable and are withdrawn wherever this document quoted them. Everything else
+  those sweeps measured stands. Check `executionOrder.interleaved === true` before
+  comparing any future latency number against the ones here.
 - **One model, one corpus.** All results are `openai/gpt-5.6-luna` on
   `~/claude-plus-plus`. The output contract is a prompt, so contract compliance and
   quote fidelity are properties of that model as much as of this design; the latency
-  ratio depends on that model's per-turn latency. `BENCH_MODEL` and `BENCH_REPO`
-  exist so this can be rerun, not so the result can be assumed to transfer.
+  penalty is per-turn cost, which is a property of that model. `BENCH_MODEL` and
+  `BENCH_REPO` exist so this can be rerun, not so the result can be assumed to
+  transfer.
 - **One separable question, measured once.** Four of the five questions are saturated
   by a single explorer, which is why fan-out measures as pure waste on them. The
   fifth was added to test the case the design's parallelism argument rests on, and
@@ -869,8 +1032,9 @@ Recorded because these are the limits of every number this spec now quotes.
 - **The first sweep was measured at `maxTurnsPerExplorer: 5`.** The default is 8 now,
   changed because of what that run showed. The affected runs completed normally, so
   latency and cost include them; what shrank is the number of runs that scored — 33
-  of 40. The second sweep is at 8 and scored 50 of 50, so the two sweeps' latency and
-  cost figures are comparable but their failure columns are not.
+  of 40. The second sweep is at 8 and scored 50 of 50, so the two sweeps' cost figures
+  are comparable but their failure columns are not — and neither sweep's latency
+  comparison is usable at all, for the separate reason above.
 - **Answer sufficiency was never implemented.** The LLM-judge rubric in the metrics
   table above does not exist in the suite. Everything reported is mechanical.
 
