@@ -15,6 +15,14 @@ import type { ExplorerResult } from "./explorer.js";
  * Each report is re-anchored on its own rather than after joining. Per-report
  * keeps one explorer's quotes from re-anchoring another's citation entries, and
  * keeps the section headers this function adds out of the parsers' way.
+ *
+ * The return value is the text the guarantee is about: every quote in it that
+ * the cited file does not contain carries a note saying so. We cannot stop an
+ * explorer inventing a line — that gate was set at zero, was unreachable, and
+ * was therefore ignored — but an invention that arrives labelled is one the main
+ * agent knows not to build on, and an unlabelled one is the whole harm.
+ * `findUnmarkedFailures` checks that property against this string; the test
+ * beside it runs the check on real output of this function.
  */
 export function synthesize(results: ExplorerResult[], cwd: string): string {
 	if (results.length === 0) return "No explorers were dispatched.";

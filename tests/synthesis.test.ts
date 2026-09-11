@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { extractQuotes, findUnmarkedFailures } from "../src/citations.js";
 import type { ExplorerResult } from "../src/explorer.js";
 import { synthesize } from "../src/synthesis.js";
 
@@ -63,5 +64,34 @@ describe("synthesize", () => {
 	it("marks fabricated quotes on the way out", () => {
 		const report = `## Key Code\n\n${FENCE}ts\n// a.ts:1\nnot in this file\n${FENCE}\n`;
 		expect(synthesize([ok("a", report)], dir)).toContain("UNVERIFIED");
+	});
+
+	it("delivers no unmarked failure, whatever the explorers sent", () => {
+		// The property stated where it actually has to hold. Everything else about
+		// re-anchoring is checked one report at a time; this is the text the main
+		// agent receives, after several reports have been joined, and it is the only
+		// place the guarantee is worth anything. A fabrication that reaches here
+		// unlabelled is read as verified and reasoned from as fact.
+		//
+		// Checked on the joined text on purpose. Joining widens the scope the
+		// misattribution search runs over, so a quote one explorer fabricated may be
+		// found in a file another explorer cited and come back misattributed
+		// instead. Both are failures and both are marked, which is why the check
+		// asks whether a note is present rather than whether it is the same note a
+		// single-report pass would have written.
+		const out = synthesize(
+			[
+				ok("real", `${FENCE}ts\n// a.ts:1\none\ntwo\n${FENCE}\n`),
+				ok("drifted", `${FENCE}ts\n// a.ts:1\nthree\nfour\n${FENCE}\n`),
+				ok("invented", `${FENCE}ts\n// a.ts:1\nnothing like this is in the file\n${FENCE}\n`),
+				ok("absent", `${FENCE}ts\n// gone.ts:1\nexport const vanished = 1\n${FENCE}\n`),
+				ok("hollow", `${FENCE}ts\n// a.ts:2\n${FENCE}\n`),
+				{ brief: "failed", report: "", ok: false, error: "timed out", usage: zeroUsage },
+			],
+			dir,
+		);
+		expect(findUnmarkedFailures(out, dir)).toEqual([]);
+		// And not vacuously: the joined text really does carry failing quotes.
+		expect(extractQuotes(out).length).toBeGreaterThan(4);
 	});
 });

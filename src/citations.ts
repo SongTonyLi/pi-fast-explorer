@@ -920,6 +920,27 @@ const PARTIAL_REFLOWED = " — PARTIAL: comment re-wrapped; the wording is verba
  * is the one thing that must not happen to an unchecked block.
  */
 const UNCHECKED_TRIVIAL = " — UNCHECKED: content too slight to verify either way";
+/**
+ * A header with no code under it.
+ *
+ * This block used to ship bare, on the reasoning that an excerpt with no content
+ * has no content to mislead anyone with. That was true about the code and wrong
+ * about the header. The header is itself a claim — it says there is something at
+ * this line worth quoting — and a bare header is one a reader takes for checked,
+ * which is the single thing that must never happen to a block nobody checked.
+ *
+ * It also left the one hole `findUnmarkedFailures` exists to rule out. `empty`
+ * is `!valid && checkable`, so it is inside the release gate's own predicate:
+ * the benchmark already counted it as a failure while this function returned
+ * null for it, which is exactly the shape of "fails the gate, ships unlabelled".
+ * Marking it is what makes the invariant total rather than total-except-one.
+ *
+ * UNCHECKED rather than UNVERIFIED, for the same reason as the trivial case
+ * above: nothing here is fiction, there was simply nothing to look at. And the
+ * line number is still not corrected — there is no content to locate, so any
+ * anchor we moved it to would be a guess.
+ */
+const UNCHECKED_EMPTY = " — UNCHECKED: no code under this header";
 
 /**
  * The note for a verdict, or null when the block needs no note.
@@ -928,15 +949,23 @@ const UNCHECKED_TRIVIAL = " — UNCHECKED: content too slight to verify either w
  * thing the caller needs and cannot recover from the block. The header's own
  * path is left as the model wrote it: rewriting a path would be inventing a
  * finding on the model's behalf, which is a worse habit than the error it fixes.
+ *
+ * Returning null is reserved for the verdicts where the block is TRUE as it
+ * stands — where a marker would be telling the caller to doubt something
+ * correct. Every other verdict must return a string, and
+ * `findUnmarkedFailures` is what proves that in the delivered text rather than
+ * here. Two things guard the mapping itself: the switch has no `default`, so a
+ * verdict added to the union without a case is a compile error, and the
+ * exhaustive test over `QuoteVerdict` catches the subtler version of the same
+ * mistake — a new verdict given a case that returns null.
  */
 function verdictMarker(result: VerifyResult): string | null {
 	switch (result.verdict) {
 		case "exact":
 		case "drifted":
-		// A header with no body: nothing to verify, and nothing for the caller to
-		// be misled by either. Marking it would be noise, correcting it a guess.
-		case "empty":
 			return null;
+		case "empty":
+			return UNCHECKED_EMPTY;
 		case "truncated":
 			return PARTIAL_TRUNCATED;
 		case "elided":
@@ -1038,7 +1067,15 @@ function reanchorCitations(
  * before the header is re-read, so a block is re-marked with the same text
  * rather than accumulating markers, and a header already corrected re-verifies
  * at zero drift. The counts describe what the pass found, not what it changed,
- * so a second pass still reports blocks that are still unverifiable.
+ * so a second pass still reports blocks that are still unverifiable. Stripping
+ * first is also what stops a model FORGING a marker: a warning the explorer
+ * wrote itself is removed and then re-derived from the file, so the note on a
+ * delivered block is always this function's finding and never the model's claim.
+ *
+ * The property that makes any of this worth doing is that the marking is
+ * COMPLETE — that no failure reaches the caller looking like a verified one.
+ * That is not asserted here; `findUnmarkedFailures` checks it against the
+ * delivered text.
  */
 export function reanchorReport(report: string, cwd: string): ReanchorResult {
 	const verified = new Map<string, number | null>();
@@ -1138,4 +1175,93 @@ export function reanchorReport(report: string, cwd: string): ReanchorResult {
 		partial,
 		trivial,
 	};
+}
+
+/**
+ * A quote the caller was handed as fact, that is not fact, with nothing on it
+ * saying so.
+ *
+ * `header` is the delivered line verbatim rather than a reconstruction, because
+ * the whole point of this check is what the text SAYS about the block, not what
+ * the verifier privately concluded about it. When one of these turns up, that
+ * string is the evidence.
+ */
+export interface UnmarkedFailure {
+	file: string;
+	startLine: number;
+	verdict: QuoteVerdict;
+	/** The fence header exactly as it appears in the delivered report. */
+	header: string;
+	/** Why the quote failed, from `verifyQuote`. */
+	reason?: string;
+}
+
+/**
+ * Every failure in a DELIVERED report that carries no marker. Empty is the
+ * safety property.
+ *
+ * We cannot stop a model quoting code that is not there. The release gate that
+ * asked us to — "any non-zero hallucination rate is a release blocker" — was
+ * unreachable by construction, measured 2.9% on the reference corpus, and was
+ * therefore shipped around. A gate that can never pass protects nothing.
+ *
+ * This is the property that can be held instead, and it is the one that
+ * actually matters: a fabrication never reaches the main agent UNLABELLED. A
+ * marked block is a block the caller knows not to trust, and a caller that knows
+ * has lost nothing but a little time. An unmarked one is the real harm — it is
+ * read as verified, reasoned from as fact, and nothing about it looks wrong.
+ * Unlike "zero fabrication" this is deterministic, checkable on demand, and
+ * already true; what was missing was the proof.
+ *
+ * Three details carry that proof, and weakening any of them would prove
+ * something weaker than it appears to:
+ *
+ *  - It reads the delivered TEXT, re-parsing and re-verifying from scratch,
+ *    rather than inspecting anything `reanchorReport` recorded on the way past.
+ *    Internal bookkeeping can only show that the marking code believed it marked
+ *    the block; the guarantee is about what the main agent receives, so the
+ *    delivered bytes are the only admissible evidence. Anything lost between the
+ *    verdict and the page — a rewritten block that no longer parses, a fence
+ *    assembled wrong, a marker clobbered by a later pass — is invisible to the
+ *    former and caught by the latter.
+ *  - "Carries a marker" is decided by the same `VERDICT_MARKER` that
+ *    `parseHeader` strips. That coupling is deliberate: a marker only counts as
+ *    marking if it also round-trips, so the one kind of marker this must never
+ *    accept — one that annotates a block and thereby deletes it from the
+ *    verifier's denominator, turning an admission of failure into a rise in the
+ *    fidelity score — cannot be counted as protection here either.
+ *  - The failure set is `!valid && checkable`, the release gate's own predicate,
+ *    rather than a hand-written list of verdicts to skip. Today that is exactly
+ *    "not valid and not `trivial`". Tomorrow it is whatever the gate means, with
+ *    no second opinion kept here to drift out of step with it.
+ */
+export function findUnmarkedFailures(report: string, cwd: string): UnmarkedFailure[] {
+	const read = cachedReader(cwd);
+	// The same search scope `reanchorReport` used, so the two agree on which
+	// quotes are misattributed rather than fabricated. Both are marked, so the
+	// distinction cannot change the verdict of this function — but a checker that
+	// classified differently from the marker would be a second opinion about the
+	// thing it is auditing, which is how audits stop meaning anything.
+	const searchFiles = citedFiles(report);
+	const out: UnmarkedFailure[] = [];
+
+	FENCE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = FENCE.exec(report)) !== null) {
+		const bodyLines = m[1]!.split("\n");
+		for (const { headerIndex, file, startLine, code } of splitExcerpts(bodyLines)) {
+			const result = verifyQuoteWith({ file, startLine, code }, read, searchFiles);
+			if (result.valid || !result.checkable) continue;
+			const header = bodyLines[headerIndex]!;
+			if (VERDICT_MARKER.test(header)) continue;
+			out.push({
+				file,
+				startLine,
+				verdict: result.verdict,
+				header,
+				...(result.reason === undefined ? {} : { reason: result.reason }),
+			});
+		}
+	}
+	return out;
 }

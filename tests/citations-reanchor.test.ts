@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { extractQuotes, reanchorReport, verifyQuote } from "../src/citations.js";
+import {
+	extractQuotes,
+	findUnmarkedFailures,
+	type QuoteVerdict,
+	reanchorReport,
+	verifyQuote,
+} from "../src/citations.js";
 
 const dir = mkdtempSync(join(tmpdir(), "fx-reanchor-"));
 mkdirSync(join(dir, "src"));
@@ -140,11 +146,22 @@ describe("reanchorReport", () => {
 		expect(out.corrected).toBe(2);
 	});
 
-	it("leaves a header with no code body exactly as written", () => {
+	it("marks a header with no code body UNCHECKED rather than leaving it bare", () => {
+		// This block used to ship exactly as written. The code was right that there
+		// is nothing here to mislead a reader with and wrong that there is therefore
+		// nothing to say: a bare header is one a reader takes for checked, and
+		// `empty` is `!valid && checkable`, so it sat inside the release gate's own
+		// predicate while carrying no label — the one hole `findUnmarkedFailures`
+		// exists to rule out.
 		const empty = `${F}ts\n// src/session.ts:9\n${F}\n`;
 		const out = reanchorReport(empty, dir);
-		expect(out.report).toBe(empty);
+		expect(out.report).toContain("// src/session.ts:9 — UNCHECKED: no code under this header");
+		// Not fabrication — there is no content to have invented.
 		expect(out.fabricated).toBe(0);
+		// And the anchor is not moved. There is nothing to locate, so any line we
+		// corrected it to would be a guess.
+		expect(out.corrected).toBe(0);
+		expect(findUnmarkedFailures(out.report, dir)).toEqual([]);
 	});
 });
 
