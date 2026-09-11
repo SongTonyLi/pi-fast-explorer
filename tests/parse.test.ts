@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGrepOutput } from "../src/parse.js";
+import { parseFindOutput, parseGrepOutput } from "../src/parse.js";
 
 describe("parseGrepOutput", () => {
 	it("extracts distinct files and counts matches", () => {
@@ -26,5 +26,19 @@ describe("parseGrepOutput", () => {
 
 	it("returns empty for empty input", () => {
 		expect(parseGrepOutput("")).toEqual({ files: [], matchCount: 0 });
+	});
+});
+
+describe("parseFindOutput", () => {
+	it("returns one path per line", () => {
+		expect(parseFindOutput("src/a.ts\nsrc/b.ts\n")).toEqual(["src/a.ts", "src/b.ts"]);
+	});
+
+	it("ignores the notices block", () => {
+		expect(parseFindOutput("src/a.ts\n\n[1000 results limit reached]")).toEqual(["src/a.ts"]);
+	});
+
+	it("returns empty for the no-results sentinel", () => {
+		expect(parseFindOutput("No files found matching pattern")).toEqual([]);
 	});
 });

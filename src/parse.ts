@@ -27,3 +27,15 @@ export function parseGrepOutput(output: string): GrepParseResult {
 
 	return { files: [...files], matchCount };
 }
+
+const NO_RESULTS = "No files found matching pattern";
+
+export function parseFindOutput(output: string): string[] {
+	const files: string[] = [];
+	for (const line of output.split("\n")) {
+		const t = line.trim();
+		if (!t || isNotice(t) || t === NO_RESULTS) continue;
+		files.push(t);
+	}
+	return files;
+}
