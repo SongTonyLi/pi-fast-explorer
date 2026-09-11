@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAccumulator, extractFinalText, processLine } from "../src/explorer.js";
+import { createAccumulator, extractDisplayItems, extractFinalText, processLine } from "../src/explorer.js";
 
 function asstMsg(text: string, usage?: Record<string, unknown>) {
 	return JSON.stringify({
@@ -33,6 +33,22 @@ describe("processLine", () => {
 		const acc = createAccumulator();
 		processLine("   ", acc);
 		expect(acc.messages).toHaveLength(0);
+	});
+
+	it("records tool_execution_start without counting a turn", () => {
+		const acc = createAccumulator();
+		processLine(
+			JSON.stringify({
+				type: "tool_execution_start",
+				toolCallId: "t1",
+				toolName: "grep",
+				args: { pattern: "x" },
+			}),
+			acc,
+		);
+		expect(acc.usage.turns).toBe(0);
+		expect(acc.pendingTools).toEqual([{ id: "t1", name: "grep", args: { pattern: "x" } }]);
+		expect(extractDisplayItems(acc)).toEqual([{ type: "toolCall", name: "grep", args: { pattern: "x" } }]);
 	});
 
 	it("records stopReason and errorMessage", () => {

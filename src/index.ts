@@ -13,15 +13,25 @@ import {
 	isGrepToolResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	type ExplorerSnapshot,
+	getExplorer,
+	nextExplorerId,
+	upsertExplorer,
+} from "./activity.js";
 import { type FastExplorerConfig, type PartialConfig, loadConfigFrom, resolveConfig } from "./config.js";
 import { looksLikeSearchOutput } from "./detect.js";
 import {
+	type Accumulator,
 	type ExplorerResult,
 	NESTED_ENV_VAR,
 	buildExplorerArgs,
+	extractDisplayItems,
+	extractFinalText,
 	runExplorer,
 	runWithConcurrency,
 } from "./explorer.js";
+import { bindExplorerUi, refreshExplorerWidget, registerExplorerCommands, renderExploreCall, renderExploreResult } from "./ui.js";
 import { parseFindOutput, parseGrepMatches, parseGrepOutput, summarizeMatches } from "./parse.js";
 import { bucketByDirectory, computeFanout, shouldExplore } from "./partition.js";
 import { hasFindings, synthesize } from "./synthesis.js";
@@ -42,6 +52,25 @@ export interface ExploreDetails {
 	 * the text content is the corrected version the main agent reasons from.
 	 */
 	results: ExplorerResult[];
+	/** Live tool-call stream used by the TUI inspector and renderers. */
+	live: ExplorerSnapshot[];
+}
+
+function snapshotFromAcc(
+	id: string,
+	brief: string,
+	acc: Accumulator,
+	status: ExplorerSnapshot["status"] = "running",
+	error?: string,
+): ExplorerSnapshot {
+	return {
+		id,
+		brief,
+		status,
+		items: extractDisplayItems(acc),
+		report: extractFinalText(acc),
+		error,
+	};
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -509,9 +538,13 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		const intentKey = kind === "bash" ? "command" : "pattern";
 		const intent = typeof event.input[intentKey] === "string" ? event.input[intentKey] : "";
 
-		const tasks = buckets.map((bucket) => () =>
-			withExplorerSlot(cfg.concurrency, () =>
-				runExplorer({
+		const tasks = buckets.map((bucket) => () => {
+			const brief = `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`;
+			const id = nextExplorerId();
+			upsertExplorer({ id, brief, status: "running", items: [], report: "" });
+			refreshExplorerWidget();
+			return withExplorerSlot(cfg.concurrency, async () => {
+				const result = await runExplorer({
 					command: "pi",
 					args: buildExplorerArgs(
 						cfg,
@@ -519,13 +552,27 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 						PROMPT_PATH,
 						buildSweepBrief(kind, intent, scope, files.length, bucket),
 					),
-					brief: `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`,
+					brief,
 					cfg,
 					cwd: ctx.cwd,
 					signal: ctx.signal,
-				}),
-			),
-		);
+					onActivity: (acc) => {
+						upsertExplorer(snapshotFromAcc(id, brief, acc));
+						refreshExplorerWidget();
+					},
+				});
+				upsertExplorer({
+					id,
+					brief,
+					status: result.ok ? "ok" : "failed",
+					items: getExplorer(id)?.items ?? [],
+					report: result.report,
+					error: result.error,
+				});
+				refreshExplorerWidget();
+				return result;
+			});
+		});
 
 		const results = await runWithConcurrency(tasks, cfg.concurrency);
 
@@ -615,10 +662,13 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			cfg,
 		);
 		cfg = config;
+		bindExplorerUi(ctx.hasUI ? ctx.ui : undefined);
 		if (error) {
 			ctx.ui.notify(`fast-explorer: ignoring invalid config — ${error}`, "warning");
 		}
 	});
+
+	registerExplorerCommands(pi);
 
 	pi.registerTool({
 		name: "explore",
@@ -642,6 +692,14 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			fanout: Type.Optional(Type.Number({ description: "Override the number of explorers" })),
 		}),
 
+		renderCall(args, theme) {
+			return renderExploreCall(args, theme);
+		},
+
+		renderResult(result, { expanded }, theme) {
+			return renderExploreResult(result, { expanded }, theme);
+		},
+
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input: ExploreInput = params;
 			// A model-supplied fanout of 0 or a negative would dispatch nothing at
@@ -649,6 +707,17 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			const maxFanout = Math.max(1, Math.min(input.fanout ?? cfg.maxFanout, cfg.maxFanout));
 			const briefs = buildBriefs(input, maxFanout);
 			const model = cfg.model ?? ctx.model?.id ?? null;
+			if (ctx.hasUI) bindExplorerUi(ctx.ui);
+
+			const live: ExplorerSnapshot[] = briefs.map((brief) => ({
+				id: nextExplorerId(),
+				brief,
+				status: "running",
+				items: [],
+				report: "",
+			}));
+			for (const snap of live) upsertExplorer(snap);
+			refreshExplorerWidget();
 
 			// Partial updates carry `details` too — AgentToolResult requires it on
 			// every emission, not just the final one.
@@ -658,11 +727,11 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 					content: [
 						{ type: "text", text: `${finished.length}/${briefs.length} explorers done` },
 					],
-					details: { briefs, results: [...finished] },
+					details: { briefs, results: [...finished], live: live.map((s) => ({ ...s })) },
 				});
 			report();
 
-			const tasks = briefs.map((brief) => async () => {
+			const tasks = briefs.map((brief, index) => async () => {
 				const task = input.scope ? `${brief}\n\nLimit your search to: ${input.scope}` : brief;
 				// The ceiling is shared with auto-promotion: both paths spawn the
 				// same subprocesses, so neither may budget for itself alone.
@@ -674,9 +743,25 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 						cfg,
 						cwd: ctx.cwd,
 						signal,
+						onActivity: (acc) => {
+							live[index] = snapshotFromAcc(live[index]!.id, brief, acc);
+							upsertExplorer(live[index]!);
+							refreshExplorerWidget();
+							report();
+						},
 					}),
 				);
+				live[index] = {
+					id: live[index]!.id,
+					brief,
+					status: result.ok ? "ok" : "failed",
+					items: live[index]!.items,
+					report: result.report,
+					error: result.error,
+				};
+				upsertExplorer(live[index]!);
 				finished.push(result);
+				refreshExplorerWidget();
 				report();
 				return result;
 			});
@@ -684,7 +769,7 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			const results = await runWithConcurrency(tasks, cfg.concurrency);
 			const usage = aggregateUsage(results);
 
-			const details: ExploreDetails = { briefs, results };
+			const details: ExploreDetails = { briefs, results, live: live.map((s) => ({ ...s })) };
 			return {
 				content: [{ type: "text" as const, text: synthesize(results, ctx.cwd) }],
 				details,

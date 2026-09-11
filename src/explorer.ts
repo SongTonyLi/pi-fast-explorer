@@ -64,9 +64,17 @@ export interface ExplorerUsage {
 	turns: number;
 }
 
+export interface StreamContentPart {
+	type?: string;
+	text?: string;
+	name?: string;
+	arguments?: Record<string, unknown>;
+	args?: Record<string, unknown>;
+}
+
 interface StreamMessage {
 	role?: string;
-	content?: Array<{ type?: string; text?: string }>;
+	content?: StreamContentPart[];
 	usage?: {
 		input?: number;
 		output?: number;
@@ -78,28 +86,110 @@ interface StreamMessage {
 	errorMessage?: string;
 }
 
+export interface PendingTool {
+	id: string;
+	name: string;
+	args: Record<string, unknown>;
+}
+
+export type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, unknown> };
+
 export interface Accumulator {
 	messages: StreamMessage[];
 	usage: ExplorerUsage;
 	stopReason?: string;
 	errorMessage?: string;
+	pendingTools: PendingTool[];
 }
 
 export function createAccumulator(): Accumulator {
 	return {
 		messages: [],
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+		pendingTools: [],
 	};
+}
+
+interface StreamEvent {
+	type?: string;
+	message?: StreamMessage;
+	toolCallId?: string;
+	toolName?: string;
+	args?: Record<string, unknown>;
+}
+
+function toolArgs(part: StreamContentPart): Record<string, unknown> {
+	if (part.arguments && typeof part.arguments === "object") return part.arguments;
+	if (part.args && typeof part.args === "object") return part.args;
+	return {};
+}
+
+function itemsFromMessages(messages: StreamMessage[]): DisplayItem[] {
+	const items: DisplayItem[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const part of msg.content) {
+			if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+				items.push({ type: "text", text: part.text });
+			} else if (part.type === "toolCall" && typeof part.name === "string" && part.name) {
+				items.push({ type: "toolCall", name: part.name, args: toolArgs(part) });
+			}
+		}
+	}
+	return items;
+}
+
+function lastAssistantHasToolCalls(messages: StreamMessage[]): boolean {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i]!;
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		return msg.content.some((part) => part.type === "toolCall" && part.name);
+	}
+	return false;
+}
+
+/**
+ * Tool calls and text the explorer has produced so far, in stream order.
+ *
+ * `tool_execution_start` can land before the assistant `message_end` that
+ * records the same calls. Those pending executions are appended only when the
+ * latest assistant message does not already list them, so the inspector does
+ * not show each grep twice.
+ */
+export function extractDisplayItems(acc: Accumulator): DisplayItem[] {
+	const items = itemsFromMessages(acc.messages);
+	if (!lastAssistantHasToolCalls(acc.messages)) {
+		for (const tool of acc.pendingTools) {
+			items.push({ type: "toolCall", name: tool.name, args: tool.args });
+		}
+	}
+	return items;
 }
 
 export function processLine(line: string, acc: Accumulator): void {
 	if (!line.trim()) return;
 
-	let event: { type?: string; message?: StreamMessage };
+	let event: StreamEvent;
 	try {
 		event = JSON.parse(line);
 	} catch {
 		// Partial or non-JSON lines are expected on a streaming pipe. Drop them.
+		return;
+	}
+
+	if (event.type === "tool_execution_start" && event.toolName) {
+		acc.pendingTools.push({
+			id: typeof event.toolCallId === "string" ? event.toolCallId : `${event.toolName}-${acc.pendingTools.length}`,
+			name: event.toolName,
+			args: event.args && typeof event.args === "object" ? event.args : {},
+		});
+		return;
+	}
+
+	if (event.type === "tool_execution_end" && event.toolCallId) {
+		acc.pendingTools = acc.pendingTools.filter((tool) => tool.id !== event.toolCallId);
 		return;
 	}
 
@@ -156,6 +246,11 @@ export interface RunExplorerOptions {
 	 * duplicate itself.
 	 */
 	onProgress?: (report: string) => void;
+	/**
+	 * Called with the live accumulator after every parsed event. Used to surface
+	 * tool calls in the TUI; the report text still goes through `onProgress`.
+	 */
+	onActivity?: (acc: Accumulator) => void;
 	/** Overridable so tests need not wait out the production grace period. */
 	sigkillGraceMs?: number;
 }
@@ -190,6 +285,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		cwd,
 		signal,
 		onProgress,
+		onActivity,
 		sigkillGraceMs = SIGKILL_GRACE_MS,
 	} = opts;
 
@@ -259,6 +355,24 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			resolve(result);
 		};
 
+		const emitProgress = () => {
+			if (onProgress) {
+				try {
+					onProgress(extractFinalText(acc));
+				} catch {
+					// A throwing consumer would otherwise become an uncaught
+					// exception in a 'data' handler and take down the host agent.
+				}
+			}
+			if (onActivity) {
+				try {
+					onActivity(acc);
+				} catch {
+					// Same isolation as onProgress: the host session must survive.
+				}
+			}
+		};
+
 		const appendStderr = (text: string) => {
 			if (!text) return;
 			stderr += text;
@@ -271,14 +385,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			buffer = lines.pop() ?? "";
 			if (buffer.length > STDOUT_BUFFER_CHARS) buffer = buffer.slice(-STDOUT_BUFFER_CHARS);
 			for (const line of lines) processLine(line, acc);
-			if (onProgress) {
-				try {
-					onProgress(extractFinalText(acc));
-				} catch {
-					// A throwing consumer would otherwise become an uncaught
-					// exception in a 'data' handler and take down the host agent.
-				}
-			}
+			emitProgress();
 		});
 
 		proc.stderr.on("data", (chunk: Buffer) => {
@@ -313,6 +420,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			buffer += stdoutDecoder.end();
 			appendStderr(stderrDecoder.end());
 			if (buffer.trim()) processLine(buffer, acc);
+			emitProgress();
 			const report = extractFinalText(acc);
 			const exited = termSignal ? `signal ${termSignal}` : `code ${code}`;
 			const error =

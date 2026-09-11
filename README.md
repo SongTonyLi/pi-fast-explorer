@@ -57,6 +57,8 @@ explore({
 
 The tool returns the concatenated explorer reports. Explorers that failed, timed out or produced nothing are listed by name under a `## Not Covered` heading rather than dropped, so the main agent can see which part of the tree is unverified. Explorer token usage and cost are reported back to pi, so they appear in session totals.
 
+While an explorer is running, its tool calls stream into the `explore` tool row (Ctrl+O expands the full trace). A below-editor widget lists live explorers. `/explorers` opens a terminal selector over this session's running and recent explorers so you can pick one and read what it is doing — there is no checklist, only that inspector.
+
 ### Auto-promotion
 
 A `tool_result` hook watches successful `grep`, `find` and `bash` results and converts sweeps into parallel exploration without being asked. This path matters more in practice than the tool does, because the common failure is the model *not* knowing a sweep was coming.
@@ -195,7 +197,7 @@ One finding is worth surfacing even without its numbers. Five consecutive sweeps
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (419 tests)
+npm test             # vitest (430 tests)
 npm run typecheck:tests
 ```
 
