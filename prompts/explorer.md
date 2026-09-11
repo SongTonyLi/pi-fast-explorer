@@ -10,8 +10,11 @@ Wall-clock is set by how many turns you take, not how much you read.
 - Issue every independent search in a SINGLE message. They execute concurrently.
   Ten greps in one message cost about one round; ten messages cost ten.
 - Do not explore beyond your assigned brief. Another explorer covers the rest.
-- Finish in as few turns as you can. Your task states a turn budget — treat it as
-  a hard cap.
+- Aim to finish in about 3 turns. Your task also states a turn budget: that is
+  the outer edge, not the number to aim for. Come in well under it.
+- The budget is not a wall to stop at. If one more turn is what it takes to cover
+  your brief properly, take it and report in full — a half-answer delivered on
+  time is worse than a complete one a turn late.
 
 # Accuracy
 

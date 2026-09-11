@@ -52,17 +52,19 @@ explore({
 })
 ```
 
-### `questions` is what makes exploration parallel
+### `questions`: when to fan out, and what it costs
 
-This is the single thing to get right at the call site. Each entry in `questions` becomes one explorer's brief, and those explorers run concurrently. **Omit `questions` and you get exactly one explorer**, working on `question` alone — there is no planner subagent that decomposes the question for you. The original design had one; it is not in the code, and nothing substitutes for it.
+Each entry in `questions` becomes one explorer's brief, and those explorers run concurrently. **Omit `questions` and you get exactly one explorer**, working on `question` alone — there is no planner subagent that decomposes the question for you. The original design had one; it is not in the code, and nothing substitutes for it.
 
-A `question`-only call is not useless: the file contents still stay out of the main agent's context, which is most of the durable benefit. But it is one subprocess reading sequentially, so it is not faster than the main agent doing the same work itself, and the fan-out that makes the exploration turn quick does not happen.
+One explorer is the right default. Measured against a real repository (`openai/gpt-5.6-luna`, 20 runs per arm), fanning a single question out to four explorers cost **3.6x** as much ($0.0629 vs $0.0176 per run) for **identical recall** (1.00 either way) and consistently *worse* precision (0.12–0.50 vs 0.25–0.67) — four explorers cite more files and dilute the ones that matter. It was slower, too: 19.1s vs 16.3s median, because wall-clock is set by the slowest explorer, not the sum. The concurrency pool was not at fault; it measured 3.0–3.3x against sequential execution, near its ceiling of 4. Those questions were simply saturated by one explorer, leaving the other three nothing left to find.
+
+So decompose when the question genuinely spans **separable areas of the codebase** — distinct subsystems, or facets that have to be looked for in different places — and not merely because the question can be phrased as several questions.
 
 ```ts
-// one explorer, sequential
-explore({ question: "How does session auth work?" })
+// one explorer: one subsystem, one place to look
+explore({ question: "How does the tokenizer handle trailing commas?" })
 
-// three explorers, concurrent
+// three explorers: three parts of the tree, none of which covers the others
 explore({
   question: "How does session auth work?",
   questions: [
@@ -73,7 +75,7 @@ explore({
 })
 ```
 
-Supplying `questions` also removes a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call. The tool's `promptGuidelines` tell the model to supply 2-4 sub-questions whenever it can decompose the task, but a model can always ignore guidance — if you are calling `explore` yourself, decompose.
+Supplying `questions` also removes a round-trip: the main agent is already reasoning when it decides to explore, so it can decompose in the turn it already occupies instead of blocking on a separate planning call. That saving is real, but it is a saving on a split you had reason to make — it is not a reason to split a question one explorer already covers. The tool's `promptGuidelines` carry the same rule and the same cost figure; a model can always ignore guidance, so if you are calling `explore` yourself, apply the test above deliberately.
 
 `questions` is truncated to `maxFanout` entries. `fanout` is clamped into `[1, maxFanout]`, so it can only narrow a call, never widen it past the configured ceiling.
 
@@ -117,7 +119,7 @@ Defaults:
   "thinking": "off",
   "maxFanout": 4,
   "concurrency": 4,
-  "maxTurnsPerExplorer": 5,
+  "maxTurnsPerExplorer": 8,
   "minTotalBytes": 51200,
   "autoPromote": { "enabled": true, "minFiles": 15, "minMatches": 60 },
   "timeoutMs": 120000
@@ -130,7 +132,7 @@ Defaults:
 | `thinking` | Thinking level passed to each explorer (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Off by default even when the model is inherited: retrieval is not reasoning, and per-turn latency dominates wall-clock. |
 | `maxFanout` | Maximum explorers per call. Must not exceed `concurrency`. |
 | `concurrency` | Ceiling on explorers running at once, extension-wide (see limitations). |
-| `maxTurnsPerExplorer` | Turn budget written into each explorer's task text. pi has no turn-limit flag, so this is a prompt-level bound, not an enforced one. |
+| `maxTurnsPerExplorer` | Turn budget written into each explorer's task text, phrased as a target to come in under. pi has no turn-limit flag, so this is **advisory** — an explorer can and sometimes does exceed it, and nothing here prevents that. It was 5; 5 was measured failing runs that had already succeeded (7 of 60 runs over budget, 5 of them at exactly 6 turns with full recall), so it is 8. The pressure to finish fast lives in `prompts/explorer.md`, which asks for about 3 turns. |
 | `minTotalBytes` | Byte floor below which exploration is skipped and the original result is left alone. |
 | `autoPromote.enabled` | Turns the `grep`/`find` hook off without affecting the `explore` tool. |
 | `autoPromote.minFiles` | Breadth threshold — distinct matched files. |
@@ -169,7 +171,9 @@ pi --mode json -p --no-session --no-extensions \
    --append-system-prompt <package>/prompts/explorer.md \
    "Task: <brief>
 
-Complete this in at most <maxTurnsPerExplorer> turns."
+Turn budget: about <maxTurnsPerExplorer> turns. Aim to come in well under it — but a
+complete report matters more than the budget, so take an extra turn if the brief
+genuinely needs one."
 ```
 
 ## Why explorers run with `--no-extensions`
@@ -218,7 +222,9 @@ These were found while building it. They are trades, not bugs to be surprised by
 
 12. **Non-determinism.** Parallel LLM calls give different answers across runs. This makes behaviour harder to test and harder to trust than a mechanical index would be.
 
-13. **`explore` without `questions` is not parallel.** There is no planner subagent, so a call that supplies only `question` runs exactly one explorer. The auto-promotion path always fans out, because it partitions a known file list; the explicit tool path fans out only as wide as the caller decomposed. See "`questions` is what makes exploration parallel" above.
+13. **`explore` without `questions` is not parallel.** There is no planner subagent, so a call that supplies only `question` runs exactly one explorer. That is the recommended default — fan-out was measured costing 3.6x for identical recall on questions one explorer already covered — but it does mean the explicit tool path fans out only as wide as the caller decomposed, while auto-promotion always fans out because it partitions a known file list. See "`questions`: when to fan out, and what it costs" above.
+
+14. **The turn budget is advisory.** pi exposes no turn-limit flag, so `maxTurnsPerExplorer` is a sentence in the task text, not a mechanism. Explorers exceed it; the only hard stops are `timeoutMs` and the model's own context limit. Do not treat it as a bound on cost or latency.
 
 ## Development
 

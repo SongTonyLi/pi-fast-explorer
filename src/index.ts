@@ -49,9 +49,55 @@ const PROMPT_PATH = join(HERE, "..", "prompts", "explorer.md");
 export const CONFIG_FILE_NAME = "fast-explorer.json";
 
 /**
+ * What the model reads before deciding whether to call explore at all.
+ *
+ * Exported so the wording is pinned by a test rather than living only inside a
+ * registration call. The cost figure is deliberate: the model is choosing
+ * between one subprocess and four, and it cannot weigh that without a number.
+ */
+export const EXPLORE_DESCRIPTION =
+	"Investigate code spanning many files using parallel read-only explorers. " +
+	"Returns cited findings (file:line) instead of raw file contents. " +
+	"One explorer is the default and covers most questions on its own. Supply " +
+	"`questions` only when the question spans separable areas of the codebase — " +
+	"distinct subsystems, or facets that have to be looked for in different places. " +
+	"Each sub-question is another subprocess: four explorers cost about 3.6x one, " +
+	"and on a question one explorer already covers they find the same files while " +
+	"citing more of the wrong ones.";
+
+/**
+ * pi appends these to the system prompt flat, with no tool-name grouping, so
+ * every bullet has to name `explore` or it reads as advice about nothing.
+ *
+ * The decomposition bullet is conditional but not hedged into uselessness: it
+ * carries a worked example of a question that does split and one that does not.
+ * Guidance vague enough that the model can never tell which side it is on gets
+ * ignored, and would leave the fan-out path dead code.
+ */
+export const EXPLORE_PROMPT_GUIDELINES = [
+	"Use explore when you need to understand code spanning more than ~5 files.",
+	"Call explore with `question` alone by default — one explorer covers most questions, " +
+		"and splitting a question it already covers into four costs about 3.6x as much for " +
+		"the same findings and worse precision.",
+	"Give explore 2-4 `questions` when the question spans separable areas of the codebase " +
+		"that one explorer could not cover well — distinct subsystems, or facets that live in " +
+		"different places. 'How does session auth work end to end' splits into minting, " +
+		"request-time validation and refresh, which sit in different files; 'how does the " +
+		"parser work' does not split just because it can be phrased three ways.",
+	"Do not use explore when you already know the exact file and line you need.",
+];
+
+/**
  * Caller-supplied `questions` remove a blocking planner round-trip from the
  * critical path: the main agent is already reasoning when it calls explore, so
  * it can decompose in the turn it already occupies.
+ *
+ * The fallback to a single brief is the common case, not a degraded one.
+ * Measured on a real repository, four explorers cost 3.6x one for identical
+ * recall and *worse* precision whenever one explorer already covered the
+ * question — the extra three had nothing left to find and only diluted the
+ * citations. Decomposition pays when the briefs land in genuinely different
+ * parts of the tree; see EXPLORE_PROMPT_GUIDELINES.
  */
 export function buildBriefs(input: ExploreInput, maxFanout: number): string[] {
 	const supplied = (input.questions ?? []).map((q) => q.trim()).filter((q) => q.length > 0);
@@ -398,21 +444,18 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 	pi.registerTool({
 		name: "explore",
 		label: "Explore",
-		description:
-			"Investigate code spanning many files using parallel read-only explorers. " +
-			"Returns cited findings (file:line) instead of raw file contents. " +
-			"Supply `questions` with 2-4 sub-questions when you can decompose the problem — " +
-			"it removes a planning round-trip and is faster.",
+		description: EXPLORE_DESCRIPTION,
 		promptSnippet: "Explore code across many files in parallel, returning cited findings",
-		promptGuidelines: [
-			"Use explore when you need to understand code spanning more than ~5 files.",
-			"When calling explore, supply `questions` with 2-4 sub-questions if you can decompose the task.",
-			"Do not use explore when you already know the exact file and line you need.",
-		],
+		promptGuidelines: EXPLORE_PROMPT_GUIDELINES,
 		parameters: Type.Object({
 			question: Type.String({ description: "What you need to find out" }),
 			questions: Type.Optional(
-				Type.Array(Type.String(), { description: "Pre-decomposed sub-questions, one per explorer" }),
+				Type.Array(Type.String(), {
+					description:
+						"Sub-questions, one per explorer. Only for a question spanning separable areas of " +
+						"the codebase — each entry is another subprocess, so a question one explorer can " +
+						"answer belongs in `question` alone.",
+				}),
 			),
 			scope: Type.Optional(Type.String({ description: "Glob or directory to limit the search" })),
 			fanout: Type.Optional(Type.Number({ description: "Override the number of explorers" })),

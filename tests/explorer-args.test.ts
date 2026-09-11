@@ -19,13 +19,23 @@ describe("buildExplorerArgs", () => {
 			"read,grep,find,ls",
 			"--append-system-prompt",
 			"/tmp/p.md",
-			"Task: find auth\n\nComplete this in at most 5 turns.",
+			"Task: find auth\n\nTurn budget: about 8 turns. Aim to come in well under it — but a " +
+				"complete report matters more than the budget, so take an extra turn if the brief " +
+				"genuinely needs one.",
 		]);
 	});
 
-	it("carries the configured turn budget into the task", () => {
+	// The budget is advisory and always was: pi has no turn-limit flag, so this
+	// sentence is the entire mechanism. It is worded as a target rather than a cap
+	// because a 5-turn "hard cap" was measured being exceeded anyway — and an
+	// explorer that reads the number as a wall stops mid-brief and reports half an
+	// answer. Do not restore "Complete this in at most N turns".
+	it("carries the configured budget as a target rather than a hard cap", () => {
 		const args = buildExplorerArgs(resolveConfig({ maxTurnsPerExplorer: 3 }), "m", "/tmp/p.md", "t");
-		expect(args.at(-1)).toBe("Task: t\n\nComplete this in at most 3 turns.");
+		const task = args.at(-1) ?? "";
+		expect(task.startsWith("Task: t\n\n")).toBe(true);
+		expect(task).toContain("about 3 turns");
+		expect(task).not.toMatch(/at most/);
 	});
 
 	// DO NOT DELETE AS REDUNDANT WITH THE toEqual PIN ABOVE. This flag is the

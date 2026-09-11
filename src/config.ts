@@ -12,6 +12,7 @@ export interface FastExplorerConfig {
 	thinking: string;
 	maxFanout: number;
 	concurrency: number;
+	/** Advisory only — see DEFAULT_CONFIG. pi has no turn-limit flag to enforce it. */
 	maxTurnsPerExplorer: number;
 	minTotalBytes: number;
 	autoPromote: AutoPromoteConfig;
@@ -23,7 +24,22 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	thinking: "off",
 	maxFanout: 4,
 	concurrency: 4,
-	maxTurnsPerExplorer: 5,
+	/**
+	 * A budget we ask explorers to come in under, NOT a guarantee. pi exposes no
+	 * turn-limit flag, so this rides in the task text as a request the model is
+	 * free to exceed; nothing in this package can stop it. Do not build anything
+	 * that depends on turn count or per-explorer cost being bounded by this — the
+	 * only hard stops are `timeoutMs` and the model's own context limit.
+	 *
+	 * 8, not 5, because 5 was measured failing runs that had already succeeded:
+	 * across 60 benchmark runs, 7 exceeded the 5-turn budget, 5 of those landing
+	 * on exactly 6 turns with recall 1.00. A bound that only converts successes
+	 * into failures is doing harm without doing good. The pressure toward finishing
+	 * fast lives in prompts/explorer.md ("aim for about 3 turns"), which is where it
+	 * works; this number is the outer edge, set above the observed overrun rather
+	 * than through it.
+	 */
+	maxTurnsPerExplorer: 8,
 	minTotalBytes: 51200,
 	autoPromote: { enabled: true, minFiles: 15, minMatches: 60 },
 	timeoutMs: 120000,

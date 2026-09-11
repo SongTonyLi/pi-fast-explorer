@@ -6,6 +6,16 @@ describe("resolveConfig", () => {
 		expect(resolveConfig()).toEqual(DEFAULT_CONFIG);
 	});
 
+	// Pinned so the number is changed on purpose, never drifted into. It was 5,
+	// and 5 was measured turning successful runs into failures: 7 of 60 benchmark
+	// runs exceeded it, 5 of them at exactly 6 turns with full recall. Raising it
+	// is not "allowing slower explorers" — prompts/explorer.md still asks for about
+	// 3 turns — it is removing a bound that only ever fired on work that had
+	// already succeeded. Lower it again only against fresh measurement.
+	it("defaults the advisory turn budget to 8", () => {
+		expect(resolveConfig().maxTurnsPerExplorer).toBe(8);
+	});
+
 	it("deep-merges autoPromote instead of replacing it", () => {
 		const cfg = resolveConfig({ autoPromote: { minFiles: 5 } });
 		expect(cfg.autoPromote.minFiles).toBe(5);

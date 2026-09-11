@@ -42,10 +42,16 @@ export function buildExplorerArgs(
 	args.push("--thinking", cfg.thinking);
 	args.push("--tools", EXPLORER_TOOLS);
 	args.push("--append-system-prompt", promptPath);
-	// pi has no turn-limit flag, so the budget rides along in the task text.
-	// A soft prompt-level bound is all that is available, but it at least makes
-	// the config key real rather than silently inert.
-	args.push(`Task: ${task}\n\nComplete this in at most ${cfg.maxTurnsPerExplorer} turns.`);
+	// pi has no turn-limit flag, so the budget rides along in the task text and is
+	// phrased as what it actually is: a target, not a rule. Wording it as a hard
+	// cap bought nothing — the model exceeded it anyway — while inviting an
+	// explorer that reaches the number to stop mid-brief and report half an
+	// answer. A truncated report is a worse outcome than one extra turn.
+	args.push(
+		`Task: ${task}\n\nTurn budget: about ${cfg.maxTurnsPerExplorer} turns. Aim to come in ` +
+			`well under it — but a complete report matters more than the budget, so take an ` +
+			`extra turn if the brief genuinely needs one.`,
+	);
 	return args;
 }
 
