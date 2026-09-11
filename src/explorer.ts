@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import type { FastExplorerConfig } from "./config.js";
 
 /**
@@ -101,4 +102,105 @@ export function extractFinalText(acc: Accumulator): string {
 		if (text) return text;
 	}
 	return "";
+}
+
+export interface ExplorerResult {
+	brief: string;
+	report: string;
+	ok: boolean;
+	error?: string;
+	usage: ExplorerUsage;
+}
+
+export interface RunExplorerOptions {
+	command: string;
+	args: string[];
+	brief: string;
+	cfg: FastExplorerConfig;
+	cwd: string;
+	signal?: AbortSignal;
+	onUpdate?: (partial: string) => void;
+}
+
+const SIGKILL_GRACE_MS = 5000;
+
+export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
+	const { command, args, brief, cfg, cwd, signal, onUpdate } = opts;
+
+	return new Promise<ExplorerResult>((resolve) => {
+		const acc = createAccumulator();
+		let stderr = "";
+		let buffer = "";
+		let settled = false;
+		let failure: string | undefined;
+
+		const proc = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+
+		const kill = () => {
+			proc.kill("SIGTERM");
+			setTimeout(() => {
+				if (!proc.killed) proc.kill("SIGKILL");
+			}, SIGKILL_GRACE_MS);
+		};
+
+		const timer = setTimeout(() => {
+			failure = `Explorer timed out after ${cfg.timeoutMs}ms`;
+			kill();
+		}, cfg.timeoutMs);
+
+		const onAbort = () => {
+			failure = "Explorer aborted";
+			kill();
+		};
+		if (signal) {
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		}
+
+		const finish = (result: ExplorerResult) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(result);
+		};
+
+		proc.stdout.on("data", (chunk: Buffer) => {
+			buffer += chunk.toString();
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) processLine(line, acc);
+			if (onUpdate) onUpdate(extractFinalText(acc));
+		});
+
+		proc.stderr.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString();
+		});
+
+		proc.on("error", (err) => {
+			finish({
+				brief,
+				report: "",
+				ok: false,
+				error: `Failed to spawn explorer: ${err.message}`,
+				usage: acc.usage,
+			});
+		});
+
+		proc.on("close", (code) => {
+			if (buffer.trim()) processLine(buffer, acc);
+			const report = extractFinalText(acc);
+			const error =
+				failure ??
+				(code !== 0
+					? `Explorer exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
+					: acc.stopReason === "error"
+						? (acc.errorMessage ?? "Explorer reported an error")
+						: !report
+							? "Explorer produced no report"
+							: undefined);
+
+			finish({ brief, report, ok: !error, error, usage: acc.usage });
+		});
+	});
 }
