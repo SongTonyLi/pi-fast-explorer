@@ -23,9 +23,20 @@ export const EXPLORER_TOOLS = "read,grep,find,ls";
  */
 export const NESTED_ENV_VAR = "PI_FAST_EXPLORER_NESTED";
 
+/**
+ * The model an explorer runs on. `provider` is set when the model was
+ * inherited from the session: a bare id is ambiguous when two providers serve
+ * the same one, and an explorer that resolves to the other provider bills a
+ * different account than the session with nothing to say so.
+ */
+export interface ExplorerModel {
+	id: string;
+	provider?: string;
+}
+
 export function buildExplorerArgs(
 	cfg: FastExplorerConfig,
-	model: string | null,
+	model: ExplorerModel | null,
 	promptPath: string,
 	task: string,
 ): string[] {
@@ -35,8 +46,21 @@ export function buildExplorerArgs(
 	// into yet more explorers. Explicit `-e` paths still load, and we pass none.
 	// It is also correct on its own terms: an explorer running arbitrary user
 	// extensions is neither read-only nor reproducible.
-	const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
-	if (model) args.push("--model", model);
+	// `--no-skills` and `--no-prompt-templates`: retrieval needs neither, and
+	// every skill the user has installed is otherwise paid for in every
+	// explorer's system prompt. Context files (AGENTS.md) are still loaded on
+	// purpose — repository conventions help an explorer read the tree.
+	const args = [
+		"--mode",
+		"json",
+		"-p",
+		"--no-session",
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+	];
+	if (model?.provider) args.push("--provider", model.provider);
+	if (model) args.push("--model", model.id);
 	// Thinking is off even when the model is inherited: retrieval is not
 	// reasoning, and per-turn latency is the dominant cost. See spec.
 	args.push("--thinking", cfg.thinking);

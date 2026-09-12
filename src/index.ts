@@ -24,6 +24,7 @@ import { type FastExplorerConfig, type PartialConfig, loadConfigFrom, resolveCon
 import { looksLikeSearchOutput } from "./detect.js";
 import {
 	type Accumulator,
+	type ExplorerModel,
 	type ExplorerResult,
 	NESTED_ENV_VAR,
 	buildExplorerArgs,
@@ -433,6 +434,23 @@ function aggregateUsage(results: ExplorerResult[]) {
 }
 
 /**
+ * Which model an explorer runs on: the configured one, else the session's.
+ *
+ * A configured model is a string the user wrote and may already be
+ * `provider/id`; no provider is invented for it. An inherited model carries the
+ * session's provider, because a bare id can be served by more than one provider
+ * and an explorer landing on the other one bills a different account silently.
+ */
+export function resolveExplorerModel(
+	cfg: FastExplorerConfig,
+	sessionModel: { id: string; provider?: string } | undefined,
+): ExplorerModel | null {
+	if (cfg.model) return { id: cfg.model };
+	if (sessionModel?.id) return { id: sessionModel.id, provider: sessionModel.provider };
+	return null;
+}
+
+/**
  * The slice of pi's ExtensionContext that auto-promotion actually uses.
  *
  * Declared structurally rather than importing ExtensionContext so the handler
@@ -441,7 +459,7 @@ function aggregateUsage(results: ExplorerResult[]) {
  */
 export interface SweepContext {
 	cwd: string;
-	model: { id: string } | undefined;
+	model: { id: string; provider?: string } | undefined;
 	/** Undefined when the agent is not streaming. Threaded so Esc cancels explorers. */
 	signal: AbortSignal | undefined;
 }
@@ -533,7 +551,7 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		}
 
 		const buckets = bucketByDirectory(files, computeFanout(files.length, cfg.maxFanout));
-		const model = cfg.model ?? ctx.model?.id ?? null;
+		const model = resolveExplorerModel(cfg, ctx.model);
 		const scope = describeScope(searchDir, event.input.glob);
 		// grep and find state their intent in `pattern`; bash has only `command`.
 		const intentKey = kind === "bash" ? "command" : "pattern";
@@ -712,7 +730,7 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			// all, so the floor of 1 keeps a bad argument from silently no-opping.
 			const maxFanout = Math.max(1, Math.min(input.fanout ?? cfg.maxFanout, cfg.maxFanout));
 			const briefs = buildBriefs(input, maxFanout);
-			const model = cfg.model ?? ctx.model?.id ?? null;
+			const model = resolveExplorerModel(cfg, ctx.model);
 			if (ctx.hasUI) bindExplorerUi(ctx.ui);
 
 			const live: ExplorerSnapshot[] = briefs.map((brief) => ({

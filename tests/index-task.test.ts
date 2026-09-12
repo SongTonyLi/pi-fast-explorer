@@ -24,3 +24,27 @@ describe("buildBriefs", () => {
 		expect(buildBriefs({ question: "q", questions: ["a", "  ", "b"] }, 4)).toEqual(["a", "b"]);
 	});
 });
+
+describe("resolveExplorerModel", () => {
+	it("inherits the session model together with its provider", async () => {
+		const { resolveExplorerModel } = await import("../src/index.js");
+		const { resolveConfig } = await import("../src/config.js");
+		expect(
+			resolveExplorerModel(resolveConfig(), { id: "deepseek/deepseek-v4.1-flash", provider: "openrouter" }),
+		).toEqual({ id: "deepseek/deepseek-v4.1-flash", provider: "openrouter" });
+	});
+
+	it("uses a configured model string without inventing a provider", async () => {
+		const { resolveExplorerModel } = await import("../src/index.js");
+		const { resolveConfig } = await import("../src/config.js");
+		expect(
+			resolveExplorerModel(resolveConfig({ model: "openai/gpt-5.6" }), { id: "x", provider: "anthropic" }),
+		).toEqual({ id: "openai/gpt-5.6" });
+	});
+
+	it("is null when neither config nor session names a model", async () => {
+		const { resolveExplorerModel } = await import("../src/index.js");
+		const { resolveConfig } = await import("../src/config.js");
+		expect(resolveExplorerModel(resolveConfig(), undefined)).toBeNull();
+	});
+});
