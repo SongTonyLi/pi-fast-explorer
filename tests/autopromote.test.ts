@@ -404,3 +404,25 @@ describe("createSweepHandler when every explorer fails", () => {
 		expect(spillsHolding(sweepOutput, before)).toEqual([]);
 	});
 });
+
+describe("describeBucket", () => {
+	// Measured: a bin-packed bucket of 8 files spanning src/services and
+	// src/memdir was labelled "8 files under src/memdir", and that label is the
+	// heading the main agent reads the report under.
+	it("names every directory a bucket spans, not just the first", async () => {
+		const { describeBucket } = await import("../src/index.js");
+		expect(describeBucket(["src/memdir/a.ts", "src/services/b.ts", "src/services/c.ts"])).toBe(
+			"3 files across src/memdir, src/services",
+		);
+	});
+
+	it("caps the directory list", async () => {
+		const { describeBucket } = await import("../src/index.js");
+		expect(describeBucket(["a/1", "b/2", "c/3", "d/4", "e/5"])).toBe("5 files across a, b, c +2 more");
+	});
+
+	it("names a single directory plainly", async () => {
+		const { describeBucket } = await import("../src/index.js");
+		expect(describeBucket(["src/a.ts", "src/b.ts"])).toBe("2 files under src");
+	});
+});

@@ -440,6 +440,20 @@ export function describeScope(searchDir: string, glob: unknown): string {
 	return parts.join(", ");
 }
 
+/**
+ * Heading for one auto-promotion bucket. Buckets are bin-packed by directory
+ * and routinely span several, so the label names them all (up to three) rather
+ * than the first file's — measured: "8 files under src/memdir" for a bucket
+ * whose report was mostly about src/services.
+ */
+export function describeBucket(bucket: string[]): string {
+	const dirs = [...new Set(bucket.map((f) => dirname(f)))];
+	if (dirs.length <= 1) return `${bucket.length} files under ${dirs[0] ?? "."}`;
+	const shown = dirs.slice(0, 3).join(", ");
+	const more = dirs.length > 3 ? ` +${dirs.length - 3} more` : "";
+	return `${bucket.length} files across ${shown}${more}`;
+}
+
 /** Which tool result a sweep came from. Decides the brief and the spill note. */
 export type SweepKind = "grep" | "find" | "bash";
 
@@ -665,7 +679,7 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		const intent = typeof event.input[intentKey] === "string" ? event.input[intentKey] : "";
 
 		const tasks = buckets.map((bucket) => () => {
-			const brief = `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`;
+			const brief = describeBucket(bucket);
 			const id = nextExplorerId();
 			let items: ExplorerSnapshot["items"] = [];
 			upsertExplorer({ id, brief, status: "running", items, report: "" });
