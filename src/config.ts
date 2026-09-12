@@ -35,6 +35,11 @@ export interface FastExplorerConfig {
 	 * deadline should catch — not a healthy explorer that is still writing.
 	 */
 	idleTimeoutMs: number;
+	/**
+	 * After the first explorer reports, re-dispatch checklist items it left
+	 * unresolved to fresh explorers, once. Off means one wave only.
+	 */
+	escalateUnresolved: boolean;
 }
 
 export const DEFAULT_CONFIG: FastExplorerConfig = {
@@ -94,6 +99,7 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	 */
 	timeoutMs: 300000,
 	idleTimeoutMs: 60000,
+	escalateUnresolved: true,
 };
 
 export type PartialConfig = Partial<Omit<FastExplorerConfig, "autoPromote">> & {
@@ -186,6 +192,9 @@ export function validatePartialConfig(source: string, value: unknown): PartialCo
 			out[key as (typeof NUMBER_KEYS)[number]] = v;
 		} else if (key === "autoPromote") {
 			out.autoPromote = validateAutoPromote(source, v);
+		} else if (key === "escalateUnresolved") {
+			if (typeof v !== "boolean") throw typeError(source, key, "a boolean", v);
+			out.escalateUnresolved = v;
 		} else {
 			throw new Error(`${source}: unknown key "${key}"`);
 		}

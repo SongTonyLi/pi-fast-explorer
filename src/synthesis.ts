@@ -63,7 +63,12 @@ export function hasFindings(results: readonly ExplorerResult[]): boolean {
  * nothing. Auto-promotion does NOT deliver it: that path has an original search
  * result to keep, and `createSweepHandler` checks `hasFindings` and keeps it.
  */
-export function synthesize(results: ExplorerResult[], cwd: string): string {
+export interface SynthesizeOptions {
+	/** A section placed after the reports and before `## Not Covered`. */
+	coverage?: string;
+}
+
+export function synthesize(results: ExplorerResult[], cwd: string, options: SynthesizeOptions = {}): string {
 	if (results.length === 0) return "No explorers were dispatched.";
 
 	const succeeded = results.filter(producedFindings);
@@ -86,6 +91,8 @@ export function synthesize(results: ExplorerResult[], cwd: string): string {
 			sections.push(`${title}\n\n${report}`);
 		}
 	}
+
+	if (options.coverage) sections.push(options.coverage);
 
 	if (failed.length > 0 || partial.length > 0) {
 		const lines = [

@@ -79,3 +79,13 @@ describe("explore tool guidance", () => {
 		expect(EXPLORE_DESCRIPTION, WHY).toMatch(/no measured benefit/);
 	});
 });
+
+describe("checklist guidance", () => {
+	// The checklist is the path with the coverage signal behind it: the extension
+	// can say which items were resolved. It has to be named where the model
+	// decides how to call the tool.
+	it("names `checklist` in the description and the guidelines", () => {
+		expect(EXPLORE_DESCRIPTION).toContain("`checklist`");
+		expect(EXPLORE_PROMPT_GUIDELINES.join("\n")).toContain("`checklist`");
+	});
+});

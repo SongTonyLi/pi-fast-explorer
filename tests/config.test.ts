@@ -58,3 +58,9 @@ describe("deadline defaults", () => {
 		expect(resolveConfig({ idleTimeoutMs: 5000 }).idleTimeoutMs).toBe(5000);
 	});
 });
+
+describe("escalation", () => {
+	it("escalates unresolved checklist items by default", () => {
+		expect(resolveConfig().escalateUnresolved).toBe(true);
+	});
+});

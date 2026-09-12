@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseChecklist } from "../src/checklist.js";
 import { extractCitations, extractQuotes } from "../src/citations.js";
 
 /**
@@ -24,8 +25,8 @@ const DRIFT =
 	"blinds the quality gate rather than breaking it. Restore the example shapes, " +
 	"or change src/citations.ts and this test together.";
 
-/** The four sections an explorer is instructed to emit, in order. */
-const OUTPUT_SECTIONS = ["## Files Retrieved", "## Key Code", "## Architecture", "## Not Covered"];
+/** The five sections an explorer is instructed to emit, in order. */
+const OUTPUT_SECTIONS = ["## Files Retrieved", "## Key Code", "## Checklist", "## Architecture", "## Not Covered"];
 
 describe("explorer prompt citation contract", () => {
 	it("worked examples parse as exactly two citations and one quote", () => {
@@ -58,12 +59,22 @@ describe("explorer prompt citation contract", () => {
 		expect(PROMPT, why).not.toContain("src/auth/session.ts");
 	});
 
-	it("reserves `##` headings for the four sections explorers emit", () => {
+	// src/checklist.ts parses the Checklist section the same way citations.ts
+	// parses the others: by shape. The worked example must be the shape.
+	it("checklist example parses as one resolved and one unresolved line", () => {
+		const lines = parseChecklist(PROMPT);
+		expect(lines, DRIFT).toHaveLength(2);
+		expect(lines[0]?.resolved, DRIFT).toBe(true);
+		expect(lines[1]?.resolved, DRIFT).toBe(false);
+		expect(lines.map((l) => l.index), DRIFT).toEqual([1, 2]);
+	});
+
+	it("reserves `##` headings for the five sections explorers emit", () => {
 		// Instructional headings live at `#`. If one is written at `##` it becomes
 		// indistinguishable from an output section, and an explorer may echo it
 		// verbatim into its report.
 		const why =
-			"only the four emitted sections may be `##` headings. An instructional " +
+			"only the five emitted sections may be `##` headings. An instructional " +
 			"heading at the same level as the output contract invites the explorer to " +
 			"echo it as a literal section — demote it to `#` instead.";
 		const headings = PROMPT.split("\n").filter((l) => l.startsWith("## "));

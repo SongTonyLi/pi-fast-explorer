@@ -72,6 +72,7 @@ export interface RenderTheme {
 
 export interface ExploreRenderArgs {
 	question?: string;
+	checklist?: string[];
 	questions?: string[];
 	scope?: string;
 	fanout?: number;
@@ -93,7 +94,9 @@ export function renderExploreCall(args: ExploreRenderArgs, theme: RenderTheme): 
 		return textComponent(lines.join("\n"));
 	}
 	const label = oneLineBrief(args.question ?? questions[0] ?? "…", 64);
-	return textComponent(`${title} ${fg(theme, "accent", label)}`);
+	const items = (args.checklist ?? []).filter((c) => c.trim()).length;
+	const suffix = items > 0 ? ` ${fg(theme, "dim", `· ${items}-item checklist`)}` : "";
+	return textComponent(`${title} ${fg(theme, "accent", label)}${suffix}`);
 }
 
 function renderSnapshot(snapshot: ExplorerSnapshot, theme: RenderTheme, expanded: boolean): string {
