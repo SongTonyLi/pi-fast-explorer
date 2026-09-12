@@ -79,10 +79,34 @@ function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** "find login — src/auth.ts:10 here" with item "find login" → "src/auth.ts:10 here". */
+function tokens(s: string): string[] {
+	return normalize(s)
+		.split(" ")
+		.filter((t) => t.length > 2);
+}
+
+/** Share of `head`'s words that also occur in `item`; 1.0 means head is made of the item's words. */
+function overlap(head: string, item: string): number {
+	const h = tokens(head);
+	if (h.length < 2) return 0;
+	const want = new Set(tokens(item));
+	return h.filter((t) => want.has(t)).length / h.length;
+}
+
+/**
+ * "find login — src/auth.ts:10 here" with item "find login" → "src/auth.ts:10 here".
+ *
+ * Explorers also restate the item in their own words before the answer —
+ * measured: "File path where agent events are persisted on disk — src/…" for
+ * the item "The file path where agent events are persisted on disk" — so a
+ * leading clause made mostly of the item's words is treated as the item too.
+ */
 function stripEcho(text: string, item: string): string {
-	const stripped = text.replace(new RegExp(`^${escapeRegExp(item.trim())}\\s*(?:[—–:-]+\\s*)?`, "i"), "").trim();
-	return stripped || "no detail given";
+	const exact = text.replace(new RegExp(`^${escapeRegExp(item.trim())}\\s*(?:[—–:-]+\\s*)?`, "i"), "").trim();
+	if (exact !== text.trim()) return exact || "no detail given";
+	const m = /^(.+?)\s+[—–]\s+([\s\S]+)$/.exec(text);
+	if (m && overlap(m[1]!, item) >= 0.6) return m[2]!.trim() || "no detail given";
+	return text.trim() || "no detail given";
 }
 
 /**

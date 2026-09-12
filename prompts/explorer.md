@@ -72,7 +72,8 @@ inside this one, even when the two come from the same file.
 
 ## Checklist
 Only when your task carries a checklist. One line per item, keeping the task's
-numbering; `[x]` means resolved with a citation, `[ ]` means not:
+numbering. `[x]` means answered with evidence — including evidence that the thing
+asked about does not exist; `[ ]` means you could not determine the answer:
 
 1. [x] what the item asked — path/to/file.ts:42 one-line answer
 2. [ ] what the item asked — what you searched and why it is unresolved

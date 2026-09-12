@@ -80,6 +80,26 @@ describe("matchChecklist", () => {
 		expect(out[1]).toEqual({ index: 2, item: "find tokens", resolved: true, note: "src/token.ts:3 minted here", source: "B" });
 	});
 
+	// Measured: explorers restate the item in their own words before the
+	// answer ("File path where agent events are persisted on disk — src/…"),
+	// so the coverage line read "item — paraphrase — answer". A leading clause
+	// that is mostly the item's own words is the item, not the answer.
+	it("strips a paraphrase of the item that precedes the answer", () => {
+		const out = matchChecklist(
+			["The file path where agent events are persisted on disk"],
+			[{ brief: "A", report: "## Checklist\n1. [x] File path where agent events are persisted on disk — `src/a.ts:391` sets EVENTS_FILE\n" }],
+		);
+		expect(out[0]?.note).toBe("`src/a.ts:391` sets EVENTS_FILE");
+	});
+
+	it("keeps a leading clause that is not a paraphrase of the item", () => {
+		const out = matchChecklist(
+			["find login"],
+			[{ brief: "A", report: "## Checklist\n1. [x] handled in the auth module — src/auth.ts:10\n" }],
+		);
+		expect(out[0]?.note).toBe("handled in the auth module — src/auth.ts:10");
+	});
+
 	it("returns an empty list for an empty checklist", () => {
 		expect(matchChecklist([], [{ brief: "A", report: REPORT }])).toEqual([]);
 	});
