@@ -8,8 +8,18 @@ import type { ExplorerResult } from "./explorer.js";
  * report, and a report of whitespace is a report of nothing.
  */
 function producedFindings(r: ExplorerResult): boolean {
-	return r.ok && r.report.trim().length > 0;
+	return (r.ok || r.partial === true) && r.report.trim().length > 0;
 }
+
+/**
+ * What the main agent is told after a failure. Measured: told "every explorer
+ * failed — timed out", its next move was to issue the identical call again,
+ * which timed out again at the same cost. A failure notice that names no
+ * alternative is read as an invitation to retry.
+ */
+export const RETRY_GUIDANCE =
+	"Do not repeat this explore call unchanged — the failure is not transient. Narrow `scope`, " +
+	"split the brief into a shorter `checklist`, or read the files named above directly.";
 
 /**
  * Whether a whole sweep produced anything at all.
@@ -58,6 +68,10 @@ export function synthesize(results: ExplorerResult[], cwd: string): string {
 
 	const succeeded = results.filter(producedFindings);
 	const failed = results.filter((r) => !producedFindings(r));
+	// A partial report is delivered as findings AND listed as not fully covered:
+	// its citations are verified like any other's, but the explorer was killed
+	// before it finished, so the area it covers is only partly examined.
+	const partial = succeeded.filter((r) => r.partial === true);
 
 	const sections: string[] = [];
 
@@ -66,14 +80,20 @@ export function synthesize(results: ExplorerResult[], cwd: string): string {
 	} else {
 		for (const r of succeeded) {
 			const { report } = reanchorReport(r.report.trim(), cwd);
-			sections.push(`# Explorer: ${r.brief}\n\n${report}`);
+			const title = r.partial
+				? `# Explorer: ${r.brief} — PARTIAL (killed while writing; incomplete)`
+				: `# Explorer: ${r.brief}`;
+			sections.push(`${title}\n\n${report}`);
 		}
 	}
 
-	if (failed.length > 0) {
-		const lines = failed.map((r) => `- ${r.brief} — ${r.error ?? "no report produced"}`);
+	if (failed.length > 0 || partial.length > 0) {
+		const lines = [
+			...failed.map((r) => `- ${r.brief} — ${r.error ?? "no report produced"}`),
+			...partial.map((r) => `- ${r.brief} — partially covered: ${r.error ?? "report incomplete"}`),
+		];
 		sections.push(
-			`## Not Covered\n\nThese areas were NOT examined. Treat them as unverified:\n\n${lines.join("\n")}`,
+			`## Not Covered\n\nThese areas were NOT fully examined. Treat them as unverified:\n\n${lines.join("\n")}\n\n${RETRY_GUIDANCE}`,
 		);
 	}
 
