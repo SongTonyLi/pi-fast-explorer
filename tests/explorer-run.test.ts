@@ -456,12 +456,15 @@ const foreverStub = stub(
 setInterval(() => process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "x" })} + "\\n"), 50);`,
 );
 
-// Two completed tool turns, then a report that is still being written when
-// the deadline hits — the shape measured in the field: seven tool turns in
-// 43 s, then a 123 s report turn killed by a 120 s cap.
+// Two completed tool turns, each carrying narration text beside its tool call
+// (pi's AssistantMessage content mixes text and toolCall parts, and models
+// narrate), then a report that is still being written when the deadline hits —
+// the shape measured in the field: seven tool turns in 43 s, then a 123 s
+// report turn killed by a 120 s cap. The narration matters: it is a non-empty
+// "final text", and a salvage gate keyed on emptiness never fires.
 const partialStub = stub(
 	"partial.mjs",
-	`const toolTurn = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "grep", arguments: { pattern: "x" } }], usage: { input: 1, output: 1, cost: { total: 0.001 } }, stopReason: "toolUse" } });
+	`const toolTurn = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Let me grep for the config keys." }, { type: "toolCall", name: "grep", arguments: { pattern: "x" } }], usage: { input: 1, output: 1, cost: { total: 0.001 } }, stopReason: "toolUse" } });
 process.stdout.write(toolTurn + "\\n" + toolTurn + "\\n");
 process.stdout.write(${updLine({ type: "text_start", contentIndex: 0 })} + "\\n");
 process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "## Files Retrieved\n1. `a.ts` (lines 1-3) - partial\n\n" })} + "\\n");
@@ -581,5 +584,42 @@ describe("runExplorer deadlines", () => {
 		expect(r.partial).toBeFalsy();
 		expect(r.report).toBe("");
 		expect(r.error).toMatch(/no report written/);
+	});
+});
+
+describe("runExplorer deadlines after exit", () => {
+	// The process has exited; only the drain wait remains. A deadline firing in
+	// that window relabels a complete report as a stalled explorer and throws
+	// it away.
+	it("does not let a deadline fire during the post-exit drain", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [leakyStub],
+			brief: "find y",
+			cfg: resolveConfig({ idleTimeoutMs: 300 }),
+			cwd: dir,
+		});
+		expect(r.ok).toBe(true);
+		expect(r.report).toContain("report from parent");
+	});
+
+	// The first cause is the informative one. A stalled explorer that the user
+	// then cancels during the SIGTERM grace must still say "stalled".
+	it("keeps the first kill cause when a second deadline or abort follows", async () => {
+		const ac = new AbortController();
+		const p = runExplorer({
+			command: process.execPath,
+			args: [stubbornStub],
+			brief: "find z",
+			cfg: resolveConfig({ idleTimeoutMs: 300 }),
+			cwd: dir,
+			signal: ac.signal,
+			sigkillGraceMs: 1200,
+		});
+		setTimeout(() => ac.abort(), 600);
+		const r = await p;
+		expect(r.ok).toBe(false);
+		expect(r.error).toMatch(/stalled/);
+		expect(r.error).not.toMatch(/abort/i);
 	});
 });

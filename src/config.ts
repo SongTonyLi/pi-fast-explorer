@@ -116,6 +116,14 @@ export function resolveConfig(partial?: PartialConfig): FastExplorerConfig {
 	if (merged.maxFanout < 1) {
 		throw new Error(`fastExplorer.maxFanout must be at least 1, got ${merged.maxFanout}`);
 	}
+	// A zero or negative deadline kills every explorer before its first byte,
+	// with nothing to say so — indistinguishable from the feature being off.
+	if (!(merged.timeoutMs > 0)) {
+		throw new Error(`fastExplorer.timeoutMs must be positive, got ${merged.timeoutMs}`);
+	}
+	if (!(merged.idleTimeoutMs > 0)) {
+		throw new Error(`fastExplorer.idleTimeoutMs must be positive, got ${merged.idleTimeoutMs}`);
+	}
 	// Fanning out wider than the concurrency limit produces multiple waves and
 	// doubles wall-clock for no benefit. See spec, "Performance".
 	if (merged.maxFanout > merged.concurrency) {

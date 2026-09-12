@@ -64,3 +64,13 @@ describe("escalation", () => {
 		expect(resolveConfig().escalateUnresolved).toBe(true);
 	});
 });
+
+describe("deadline ranges", () => {
+	// idleTimeoutMs: 0 kills every explorer before its first byte, with no
+	// warning — indistinguishable from the feature being switched off.
+	it("rejects a non-positive idle window or hard cap", () => {
+		expect(() => resolveConfig({ idleTimeoutMs: 0 })).toThrow(/idleTimeoutMs/);
+		expect(() => resolveConfig({ idleTimeoutMs: -5000 })).toThrow(/idleTimeoutMs/);
+		expect(() => resolveConfig({ timeoutMs: 0 })).toThrow(/timeoutMs/);
+	});
+});

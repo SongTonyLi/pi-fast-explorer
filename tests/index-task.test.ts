@@ -132,3 +132,27 @@ describe("shouldEscalate", () => {
 		expect(shouldEscalate(resolveConfig({ escalateUnresolved: false }), unresolved, [okResult])).toBe(false);
 	});
 });
+
+describe("checklistReports", () => {
+	const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+	// Coverage must be computed from the same reports the caller receives. A
+	// report synthesize discards — output cap, error stop, post-kill narration —
+	// was never verified and is never shown, so its [x] lines must not count.
+	it("uses only the reports that reach the caller", async () => {
+		const { checklistReports } = await import("../src/index.js");
+		const results = [
+			{ brief: "ok", report: "## Checklist\n1. [x] a — x.ts:1", ok: true, usage: zeroUsage },
+			{ brief: "cut", report: "## Checklist\n2. [x] b — y.ts:1", ok: false, error: "length", usage: zeroUsage },
+			{ brief: "partial", report: "## Files Retrieved\n1. `z.ts` (lines 1-1) - z\n## Checklist\n3. [x] c — z.ts:1", ok: false, partial: true, error: "timed out", usage: zeroUsage },
+		];
+		expect(checklistReports(results).map((r) => r.brief)).toEqual(["ok", "partial"]);
+	});
+});
+
+describe("checklistItems", () => {
+	it("caps the list so a model cannot blow up the explorer argv", async () => {
+		const { checklistItems, MAX_CHECKLIST_ITEMS } = await import("../src/index.js");
+		const many = Array.from({ length: MAX_CHECKLIST_ITEMS + 10 }, (_, i) => `item ${i + 1}`);
+		expect(checklistItems({ question: "q", checklist: many })).toHaveLength(MAX_CHECKLIST_ITEMS);
+	});
+});

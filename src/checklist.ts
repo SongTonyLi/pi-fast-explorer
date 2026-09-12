@@ -16,6 +16,8 @@ export interface ChecklistItem {
 
 export interface ChecklistLine {
 	index: number;
+	/** Whether the explorer wrote the number, or it was assigned by position. */
+	explicit: boolean;
 	resolved: boolean;
 	/** Everything after the checkbox, trimmed. */
 	text: string;
@@ -61,7 +63,7 @@ export function parseChecklist(report: string): ChecklistLine[] {
 		const m = LINE.exec(raw);
 		if (!m) continue;
 		const index = m[1] ? Number(m[1]) : out.length + 1;
-		out.push({ index, resolved: m[2] !== " ", text: m[3] ?? "" });
+		out.push({ index, explicit: Boolean(m[1]), resolved: m[2] !== " ", text: m[3] ?? "" });
 	}
 	return out;
 }
@@ -109,16 +111,28 @@ function stripEcho(text: string, item: string): string {
 	return text.trim() || "no detail given";
 }
 
+export interface ChecklistReport {
+	brief: string;
+	report: string;
+	/**
+	 * The item numbers this explorer's brief carried, when it was handed a
+	 * subset. A subset report's positional lines restart at 1 and its explicit
+	 * numbers may only name items it was given; without this an escalation
+	 * answer lands on item 1.
+	 */
+	allowed?: number[];
+}
+
 /**
  * One status per item, in item order. A line is attributed to an item by its
  * echoed text first — the more reliable key, since an escalation explorer may
- * renumber the subset it was given — and by number otherwise. Across several
- * reports any `[x]` wins, and the winner's brief is recorded.
+ * renumber the subset it was given — and by number otherwise. The text key is
+ * anchored at the start of the line, where the contract puts the item: an
+ * answer naturally mentions related items, and scanning it would let one
+ * item's answer claim another. Across several reports any `[x]` wins, and the
+ * winner's brief is recorded.
  */
-export function matchChecklist(
-	items: string[],
-	reports: Array<{ brief: string; report: string }>,
-): ChecklistStatus[] {
+export function matchChecklist(items: string[], reports: ChecklistReport[]): ChecklistStatus[] {
 	if (items.length === 0) return [];
 	const statuses: ChecklistStatus[] = items.map((item, i) => ({
 		index: i + 1,
@@ -133,13 +147,19 @@ export function matchChecklist(
 		.filter((x) => x.n.length > 0)
 		.sort((a, b) => b.n.length - a.n.length);
 
-	for (const { brief, report } of reports) {
+	for (const { brief, report, allowed } of reports) {
 		for (const line of parseChecklist(report)) {
 			const nl = normalize(line.text);
-			let idx = byText.find((x) => nl.includes(x.n))?.i;
+			let idx = byText.find((x) => nl.startsWith(x.n))?.i;
 			if (idx === undefined) {
-				if (line.index < 1 || line.index > items.length) continue;
-				idx = line.index - 1;
+				let number: number | undefined;
+				if (allowed) {
+					number = line.explicit ? (allowed.includes(line.index) ? line.index : undefined) : allowed[line.index - 1];
+				} else {
+					number = line.index;
+				}
+				if (number === undefined || number < 1 || number > items.length) continue;
+				idx = number - 1;
 			}
 			const status = statuses[idx]!;
 			const note = stripEcho(line.text, items[idx]!);

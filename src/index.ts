@@ -22,6 +22,7 @@ import {
 } from "./activity.js";
 import {
 	type ChecklistItem,
+	type ChecklistReport,
 	type ChecklistStatus,
 	formatChecklistCoverage,
 	matchChecklist,
@@ -43,7 +44,7 @@ import {
 import { bindExplorerUi, refreshExplorerWidget, registerExplorerCommands, renderExploreCall, renderExploreResult } from "./ui.js";
 import { parseFindOutput, parseGrepMatches, parseGrepOutput, summarizeMatches } from "./parse.js";
 import { bucketByDirectory, computeFanout, shouldExplore } from "./partition.js";
-import { hasFindings, synthesize } from "./synthesis.js";
+import { hasFindings, producedFindings, synthesize } from "./synthesis.js";
 
 export interface ExploreInput {
 	question: string;
@@ -178,12 +179,38 @@ export function buildBriefs(input: ExploreInput, maxFanout: number): string[] {
 	return [input.question];
 }
 
+/**
+ * Cap on checklist items. The list is inlined into every explorer's argv on
+ * both waves and is model-controlled; file lists are capped at 40 for the same
+ * reason (MAX_FILES_PER_BRIEF), and a pathological list should truncate rather
+ * than fail the spawn with E2BIG.
+ */
+export const MAX_CHECKLIST_ITEMS = 40;
+
 /** The checklist as numbered items, blanks dropped, numbered as the explorer will echo them. */
 export function checklistItems(input: ExploreInput): ChecklistItem[] {
 	return (input.checklist ?? [])
 		.map((c) => c.trim())
 		.filter((c) => c.length > 0)
+		.slice(0, MAX_CHECKLIST_ITEMS)
 		.map((item, i) => ({ index: i + 1, item }));
+}
+
+/**
+ * The reports the checklist is matched against: exactly the ones the caller
+ * receives. A report synthesize discards — output cap, error stop, narration
+ * left by a kill — was never verified and is never shown, so its [x] lines
+ * must not count either. `allowed` carries the item numbers a second-wave
+ * brief was handed, keyed by that explorer's brief label.
+ */
+export function checklistReports(
+	results: ExplorerResult[],
+	allowedByBrief: ReadonlyMap<string, number[]> = new Map(),
+): ChecklistReport[] {
+	return results.filter(producedFindings).map((r) => {
+		const allowed = allowedByBrief.get(r.brief);
+		return allowed ? { brief: r.brief, report: r.report, allowed } : { brief: r.brief, report: r.report };
+	});
 }
 
 const CHECKLIST_HEADER = "Checklist — resolve every item and cite file:line for each:";
@@ -247,10 +274,15 @@ export function buildEscalationBriefs(
 	);
 }
 
+/** The item numbers a second-wave task carries, read back from its checklist block. */
+export function escalationItems(task: string): number[] {
+	const tail = task.slice(task.lastIndexOf(CHECKLIST_HEADER));
+	return [...tail.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+}
+
 /** Short label for a second-wave explorer, from the item numbers its task carries. */
 export function escalationLabel(task: string, ordinal: number, total: number): string {
-	const tail = task.slice(task.lastIndexOf(CHECKLIST_HEADER));
-	const numbers = [...tail.matchAll(/^(\d+)\. /gm)].map((m) => m[1]);
+	const numbers = escalationItems(task);
 	return `escalation ${ordinal}/${total}: unresolved item${numbers.length === 1 ? "" : "s"} ${numbers.join(", ")}`;
 }
 
@@ -719,6 +751,11 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 
 		const results = await runWithConcurrency(tasks, cfg.concurrency);
 
+		// The user cancelled. Whatever the explorers streamed before the abort,
+		// the model's own search result stays: a cancellation must never destroy
+		// the result the user was reading.
+		if (ctx.signal?.aborted) return undefined;
+
 		// Every explorer failed, so there is nothing to promote. Returning here
 		// leaves pi's own result in place byte for byte (`agent-session.js:258` —
 		// a handler that returns undefined is not applied at all), which is the
@@ -944,22 +981,23 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 				briefs.map((brief) => ({ brief, task: buildTask(brief, items, input.scope) })),
 			);
 			let results = wave1;
-			const asReports = (rs: ExplorerResult[]) => rs.map((r) => ({ brief: r.brief, report: r.report }));
+			const allowedByBrief = new Map<string, number[]>();
 			if (items.length > 0) {
-				checklist = matchChecklist(items.map((i) => i.item), asReports(wave1));
+				checklist = matchChecklist(items.map((i) => i.item), checklistReports(wave1));
 				// One escalation wave, never a third: whatever the second wave leaves
 				// unresolved is reported as unresolved.
 				if (!signal?.aborted && shouldEscalate(cfg, checklist, wave1)) {
 					const prior = wave1.filter((r) => r.report.trim().length > 0).map((r) => r.report);
 					const escalations = buildEscalationBriefs(input.question, checklist, prior, maxFanout);
 					const wave2 = await dispatch(
-						escalations.map((task, i) => ({
-							brief: escalationLabel(task, i + 1, escalations.length),
-							task: buildTask(task, [], input.scope),
-						})),
+						escalations.map((task, i) => {
+							const brief = escalationLabel(task, i + 1, escalations.length);
+							allowedByBrief.set(brief, escalationItems(task));
+							return { brief, task: buildTask(task, [], input.scope) };
+						}),
 					);
 					results = [...wave1, ...wave2];
-					checklist = matchChecklist(items.map((i) => i.item), asReports(results));
+					checklist = matchChecklist(items.map((i) => i.item), checklistReports(results, allowedByBrief));
 				}
 			}
 			const usage = aggregateUsage(results);
@@ -976,6 +1014,7 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 						type: "text" as const,
 						text: synthesize(results, ctx.cwd, {
 							coverage: items.length > 0 ? formatChecklistCoverage(checklist) : undefined,
+							retryGuidance: true,
 						}),
 					},
 				],

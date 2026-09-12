@@ -16,8 +16,8 @@ const REPORT = [
 describe("parseChecklist", () => {
 	it("reads numbered checkbox lines from the Checklist section", () => {
 		expect(parseChecklist(REPORT)).toEqual([
-			{ index: 1, resolved: true, text: "find login — src/auth.ts:10 handled here" },
-			{ index: 2, resolved: false, text: "find tokens — searched src/, nothing" },
+			{ index: 1, explicit: true, resolved: true, text: "find login — src/auth.ts:10 handled here" },
+			{ index: 2, explicit: true, resolved: false, text: "find tokens — searched src/, nothing" },
 		]);
 	});
 
@@ -27,8 +27,8 @@ describe("parseChecklist", () => {
 
 	it("numbers unnumbered bullets by position and accepts an uppercase X", () => {
 		expect(parseChecklist("## Checklist\n- [X] a\n- [ ] b\n")).toEqual([
-			{ index: 1, resolved: true, text: "a" },
-			{ index: 2, resolved: false, text: "b" },
+			{ index: 1, explicit: false, resolved: true, text: "a" },
+			{ index: 2, explicit: false, resolved: false, text: "b" },
 		]);
 	});
 
@@ -36,8 +36,8 @@ describe("parseChecklist", () => {
 	// contract, the heading is where they are supposed to live.
 	it("falls back to checkbox lines anywhere when the heading is missing", () => {
 		expect(parseChecklist("Findings:\n1. [x] a — here\n2. [ ] b\n")).toEqual([
-			{ index: 1, resolved: true, text: "a — here" },
-			{ index: 2, resolved: false, text: "b" },
+			{ index: 1, explicit: true, resolved: true, text: "a — here" },
+			{ index: 2, explicit: true, resolved: false, text: "b" },
 		]);
 	});
 
@@ -50,7 +50,7 @@ describe("parseChecklist", () => {
 describe("matchChecklist", () => {
 	const items = ["find login", "find tokens"];
 
-	it("aligns by index and strips the echoed item from the note", () => {
+	it("matches echoed items by text and strips the echo from the note", () => {
 		expect(matchChecklist(items, [{ brief: "A", report: REPORT }])).toEqual([
 			{ index: 1, item: "find login", resolved: true, note: "src/auth.ts:10 handled here", source: "A" },
 			{ index: 2, item: "find tokens", resolved: false, note: "searched src/, nothing", source: "A" },
@@ -98,6 +98,45 @@ describe("matchChecklist", () => {
 			[{ brief: "A", report: "## Checklist\n1. [x] handled in the auth module — src/auth.ts:10\n" }],
 		);
 		expect(out[0]?.note).toBe("handled in the auth module — src/auth.ts:10");
+	});
+
+	// The item is at the START of the line by contract. Scanning the answer text
+	// too lets one item's answer, which naturally mentions related items, claim
+	// them — and a wrongly resolved item is never escalated.
+	it("does not let one item's answer text claim another item", () => {
+		const out = matchChecklist(
+			["the idle deadline", "the timeoutMs hard cap default"],
+			[{ brief: "A", report: "## Checklist\n1. [x] the idle deadline — armIdle at src/explorer.ts:430, distinct from the timeoutMs hard cap default\n" }],
+		);
+		expect(out[0]?.resolved).toBe(true);
+		expect(out[1]?.resolved).toBe(false);
+	});
+
+	// A second-wave explorer is handed a subset and may bullet it, so its
+	// positional numbers restart at 1. The numbers that brief carried are known
+	// and must be the key, or a wave-2 answer lands on item 1.
+	it("maps a subset report's positional lines through the numbers that brief was handed", () => {
+		const out = matchChecklist(
+			["where the retry budget is configured", "how idle is measured", "how the drain timer is armed"],
+			[{ brief: "esc", report: "## Checklist\n- [x] drain timer armed on the exit event — src/explorer.ts:591\n", allowed: [3] }],
+		);
+		expect(out[0]?.resolved).toBe(false);
+		expect(out[2]).toEqual({
+			index: 3,
+			item: "how the drain timer is armed",
+			resolved: true,
+			// The leading clause is a paraphrase of the item and is stripped.
+			note: "src/explorer.ts:591",
+			source: "esc",
+		});
+	});
+
+	it("ignores an explicit number a subset report was not handed", () => {
+		const out = matchChecklist(
+			["a", "b", "c"],
+			[{ brief: "esc", report: "## Checklist\n1. [x] something — src/y.ts:2\n", allowed: [3] }],
+		);
+		expect(out.every((s) => !s.resolved)).toBe(true);
 	});
 
 	it("returns an empty list for an empty checklist", () => {

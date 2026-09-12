@@ -426,3 +426,48 @@ describe("describeBucket", () => {
 		expect(describeBucket(["src/a.ts", "src/b.ts"])).toBe("2 files under src");
 	});
 });
+
+/**
+ * The user presses Esc during a promoted sweep. Before partial salvage this
+ * produced no findings and the handler returned undefined, leaving pi's own
+ * grep result untouched. A salvaged fragment must not change that: the user's
+ * own cancellation must never destroy the result they were reading.
+ */
+describe("createSweepHandler when the user aborts", () => {
+	const handler = createSweepHandler(() => resolveConfig({ timeoutMs: 10_000 }));
+	const originalPath = process.env.PATH;
+
+	afterEach(() => {
+		process.env.PATH = originalPath;
+	});
+
+	// Streams the start of a report and then hangs, so an abort finds a
+	// salvageable fragment.
+	const streamingPi = (() => {
+		const binDir = join(root, "bin-streaming");
+		mkdirSync(binDir, { recursive: true });
+		const upd = (ev: Record<string, unknown>) => JSON.stringify({ type: "message_update", assistantMessageEvent: ev });
+		writeFileSync(
+			join(binDir, "pi"),
+			`#!${process.execPath}
+console.log(${JSON.stringify(upd({ type: "text_start", contentIndex: 0 }))});
+console.log(${JSON.stringify(upd({ type: "text_delta", contentIndex: 0, delta: "## Files Retrieved\\n1. \`f0.ts\` (lines 1-1) - so far\\n" }))});
+setTimeout(() => {}, 60000);
+`,
+			{ mode: 0o755 },
+		);
+		return binDir;
+	})();
+
+	it("leaves the original result untouched when the sweep is aborted mid-stream", async () => {
+		const before = spillNames();
+		process.env.PATH = `${streamingPi}${delimiter}${originalPath ?? ""}`;
+		const ac = new AbortController();
+		const ctx: SweepContext = { cwd: sweepDir, model: undefined, signal: ac.signal };
+		setTimeout(() => ac.abort(), 300);
+
+		expect(await handler(grepResult(sweepOutput), ctx)).toBeUndefined();
+		expect(activeExplorerCount()).toBe(0);
+		expect(spillsHolding(sweepOutput, before)).toEqual([]);
+	});
+});

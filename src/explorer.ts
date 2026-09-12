@@ -422,7 +422,10 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		// explorer is never silent for long — silence means a stalled provider
 		// call or a hung process. A wall-clock cap alone was measured killing a
 		// healthy explorer mid-report, after every token of reading was paid for.
+		// The first cause is the informative one: a stalled explorer the user
+		// then cancels during the SIGTERM grace still reports "stalled".
 		const timer = setTimeout(() => {
+			if (killedBy) return;
 			killedBy = "timeout";
 			kill();
 		}, cfg.timeoutMs);
@@ -430,13 +433,23 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		const armIdle = () => {
 			if (idleTimer) clearTimeout(idleTimer);
 			idleTimer = setTimeout(() => {
+				if (killedBy) return;
 				killedBy = "idle";
 				kill();
 			}, cfg.idleTimeoutMs);
 		};
 		armIdle();
 
+		// Once the process has exited only the stdio drain remains, and a
+		// deadline firing in that window would relabel a complete report as a
+		// stalled explorer and throw it away.
+		const disarm = () => {
+			clearTimeout(timer);
+			if (idleTimer) clearTimeout(idleTimer);
+		};
+
 		const onAbort = () => {
+			if (killedBy) return;
 			killedBy = "abort";
 			kill();
 		};
@@ -526,8 +539,12 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			// Salvage: killed with a report half-written. The turn in progress is
 			// one past the completed count. Only a report is worth salvaging —
 			// narration is not — and only when no complete report exists.
+			// Keyed on kind, not presence: tool turns routinely carry narration
+			// text beside their tool calls ("Let me grep for the config keys."),
+			// and that narration is a non-empty final text. Measured in the field
+			// as the last complete assistant text before the kill.
 			const streamed = extractStreamingText(acc);
-			const partial = killedBy !== undefined && !finalReport && looksLikeReport(streamed);
+			const partial = killedBy !== undefined && looksLikeReport(streamed) && !looksLikeReport(finalReport);
 			const report = partial ? streamed : finalReport;
 			const turn = acc.usage.turns + 1;
 			const phase = partial
@@ -588,6 +605,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 
 		// Backstop: the process exited but something else still holds the pipes.
 		proc.on("exit", (code, termSignal) => {
+			disarm();
 			drainTimer = setTimeout(() => finalize(code, termSignal), DRAIN_MS);
 		});
 	});

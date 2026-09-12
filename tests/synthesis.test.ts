@@ -139,24 +139,39 @@ describe("synthesize", () => {
 		});
 		expect(hasFindings([partial("## Files Retrieved\n1. `a.ts` (lines 1-1) - x")])).toBe(true);
 		expect(hasFindings([partial("")])).toBe(false);
+		// A bare heading is a report that says nothing; on the auto-promotion
+		// path counting it would replace a real grep result with an empty section.
+		expect(hasFindings([partial("## Files Retrieved\n")])).toBe(false);
 	});
 
 	// Measured: told "every explorer failed — timed out", the main agent's next
 	// move was to issue the identical call again, which timed out again. The
 	// failure text has to say what to do instead.
-	it("tells the main agent not to repeat a failed call unchanged", () => {
+	it("tells the main agent not to repeat a failed call unchanged, when asked to", () => {
 		const out = synthesize(
 			[
 				ok("auth", "auth findings"),
 				{ brief: "db layer", report: "", ok: false, error: "timed out", usage: zeroUsage },
 			],
 			dir,
+			{ retryGuidance: true },
 		);
 		expect(out).toContain("Do not repeat this explore call unchanged");
 		expect(out).toMatch(/narrow|split|read .* directly/i);
 	});
 
 	it("carries no retry guidance when everything succeeded", () => {
-		expect(synthesize([ok("a", "x")], dir)).not.toContain("Do not repeat");
+		expect(synthesize([ok("a", "x")], dir, { retryGuidance: true })).not.toContain("Do not repeat");
+	});
+
+	// The guidance names `scope` and `checklist`, which only the explore tool
+	// has. On the auto-promotion path the model called grep or bash and made no
+	// explore call to repeat.
+	it("carries no retry guidance unless the caller asks for it", () => {
+		const out = synthesize(
+			[{ brief: "db layer", report: "", ok: false, error: "timed out", usage: zeroUsage }],
+			dir,
+		);
+		expect(out).not.toContain("Do not repeat");
 	});
 });

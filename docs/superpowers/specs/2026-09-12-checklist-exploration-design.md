@@ -96,8 +96,9 @@ export interface ChecklistLine { index: number; resolved: boolean; text: string 
 export interface ChecklistStatus { index: number; item: string; resolved: boolean; note: string; source?: string }
 
 parseChecklist(report): ChecklistLine[]          // tolerant: "N. [x]", "- [x]", "[X]", "[ ]"
-matchChecklist(items, reports: {brief, report}[]): ChecklistStatus[]
-                                                  // by index first; an item no report mentions is unresolved, note "not reported"
+matchChecklist(items, reports: {brief, report, allowed?}[]): ChecklistStatus[]
+                                                  // by echoed item text (anchored at line start) first, then by number;
+                                                  // an item no report mentions is unresolved, note "not reported"
 formatChecklistCoverage(statuses): string          // "## Checklist coverage\n3/5 resolved.\nUnresolved:\n- 2. item — note"
 ```
 
