@@ -1,6 +1,6 @@
 {
 	"name": "pi-fast-explorer",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Parallel read-only subagent exploration for the pi coding agent",
 	"type": "module",
 	"main": "./dist/index.js",

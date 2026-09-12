@@ -23,9 +23,20 @@ export const EXPLORER_TOOLS = "read,grep,find,ls";
  */
 export const NESTED_ENV_VAR = "PI_FAST_EXPLORER_NESTED";
 
+/**
+ * The model an explorer runs on. `provider` is set when the model was
+ * inherited from the session: a bare id is ambiguous when two providers serve
+ * the same one, and an explorer that resolves to the other provider bills a
+ * different account than the session with nothing to say so.
+ */
+export interface ExplorerModel {
+	id: string;
+	provider?: string;
+}
+
 export function buildExplorerArgs(
 	cfg: FastExplorerConfig,
-	model: string | null,
+	model: ExplorerModel | null,
 	promptPath: string,
 	task: string,
 ): string[] {
@@ -35,8 +46,21 @@ export function buildExplorerArgs(
 	// into yet more explorers. Explicit `-e` paths still load, and we pass none.
 	// It is also correct on its own terms: an explorer running arbitrary user
 	// extensions is neither read-only nor reproducible.
-	const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
-	if (model) args.push("--model", model);
+	// `--no-skills` and `--no-prompt-templates`: retrieval needs neither, and
+	// every skill the user has installed is otherwise paid for in every
+	// explorer's system prompt. Context files (AGENTS.md) are still loaded on
+	// purpose — repository conventions help an explorer read the tree.
+	const args = [
+		"--mode",
+		"json",
+		"-p",
+		"--no-session",
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+	];
+	if (model?.provider) args.push("--provider", model.provider);
+	if (model) args.push("--model", model.id);
 	// Thinking is off even when the model is inherited: retrieval is not
 	// reasoning, and per-turn latency is the dominant cost. See spec.
 	args.push("--thinking", cfg.thinking);
@@ -103,6 +127,12 @@ export interface Accumulator {
 	stopReason?: string;
 	errorMessage?: string;
 	pendingTools: PendingTool[];
+	/**
+	 * Text of the assistant message currently being streamed, assembled from
+	 * `message_update` deltas. Undefined when no message is open. This is what
+	 * gets salvaged if the explorer is killed mid-report.
+	 */
+	streaming?: string;
 }
 
 export function createAccumulator(): Accumulator {
@@ -119,6 +149,22 @@ interface StreamEvent {
 	toolCallId?: string;
 	toolName?: string;
 	args?: Record<string, unknown>;
+	assistantMessageEvent?: { type?: string; delta?: string; content?: string };
+}
+
+/** The assistant text being streamed right now, or "" when nothing is open. */
+export function extractStreamingText(acc: Accumulator): string {
+	return acc.streaming ?? "";
+}
+
+/**
+ * Whether streamed text is a report rather than narration. The contract's
+ * sections are `##` headings; a model saying "Let me look at a few more files"
+ * has none, and salvaging that would hand the main agent findings that say
+ * nothing.
+ */
+export function looksLikeReport(text: string): boolean {
+	return /^## /m.test(text);
 }
 
 function toolArgs(part: StreamContentPart): Record<string, unknown> {
@@ -206,11 +252,22 @@ export function processLine(line: string, acc: Accumulator): void {
 		return;
 	}
 
+	if (event.type === "message_update") {
+		const ev = event.assistantMessageEvent;
+		if (ev?.type === "text_start") acc.streaming = "";
+		else if (ev?.type === "text_delta" && typeof ev.delta === "string") {
+			acc.streaming = (acc.streaming ?? "") + ev.delta;
+		} else if (ev?.type === "text_end" && typeof ev.content === "string") acc.streaming = ev.content;
+		return;
+	}
+
 	if (event.type !== "message_end" || !event.message) return;
 	const msg = event.message;
 	acc.messages.push(msg);
 
 	if (msg.role !== "assistant") return;
+	// The message is complete; whatever was streaming is now in `messages`.
+	acc.streaming = undefined;
 	acc.usage.turns++;
 	const u = msg.usage;
 	if (u) {
@@ -244,6 +301,12 @@ export interface ExplorerResult {
 	ok: boolean;
 	error?: string;
 	usage: ExplorerUsage;
+	/**
+	 * True when `report` is the text the explorer was still writing when it was
+	 * killed. Never `ok`; delivered anyway, marked, because verified partial
+	 * findings beat nothing and the money is spent either way.
+	 */
+	partial?: boolean;
 }
 
 export interface RunExplorerOptions {
@@ -269,6 +332,11 @@ export interface RunExplorerOptions {
 }
 
 const SIGKILL_GRACE_MS = 5000;
+
+/** "0.3s", "60s", "300s" — for deadline messages. */
+function formatSeconds(ms: number): string {
+	return `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s`;
+}
 
 /**
  * `close` needs stdio EOF as well as process exit, and a grandchild that
@@ -320,8 +388,10 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		let settled = false;
 		let spawned = false;
 		let failure: string | undefined;
+		let killedBy: "timeout" | "idle" | "abort" | undefined;
 		let graceTimer: ReturnType<typeof setTimeout> | undefined;
 		let drainTimer: ReturnType<typeof setTimeout> | undefined;
+		let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const proc = spawn(command, args, {
 			cwd,
@@ -347,13 +417,40 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			graceTimer.unref();
 		};
 
+		// Two deadlines. The hard cap is the backstop; the idle window is the one
+		// that does the work. pi streams a message_update per token, so a live
+		// explorer is never silent for long — silence means a stalled provider
+		// call or a hung process. A wall-clock cap alone was measured killing a
+		// healthy explorer mid-report, after every token of reading was paid for.
+		// The first cause is the informative one: a stalled explorer the user
+		// then cancels during the SIGTERM grace still reports "stalled".
 		const timer = setTimeout(() => {
-			failure = `Explorer timed out after ${cfg.timeoutMs}ms`;
+			if (killedBy) return;
+			killedBy = "timeout";
 			kill();
 		}, cfg.timeoutMs);
 
+		const armIdle = () => {
+			if (idleTimer) clearTimeout(idleTimer);
+			idleTimer = setTimeout(() => {
+				if (killedBy) return;
+				killedBy = "idle";
+				kill();
+			}, cfg.idleTimeoutMs);
+		};
+		armIdle();
+
+		// Once the process has exited only the stdio drain remains, and a
+		// deadline firing in that window would relabel a complete report as a
+		// stalled explorer and throw it away.
+		const disarm = () => {
+			clearTimeout(timer);
+			if (idleTimer) clearTimeout(idleTimer);
+		};
+
 		const onAbort = () => {
-			failure = "Explorer aborted";
+			if (killedBy) return;
+			killedBy = "abort";
 			kill();
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -362,6 +459,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (idleTimer) clearTimeout(idleTimer);
 			if (graceTimer) clearTimeout(graceTimer);
 			if (drainTimer) clearTimeout(drainTimer);
 			signal?.removeEventListener("abort", onAbort);
@@ -393,6 +491,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		};
 
 		proc.stdout.on("data", (chunk: Buffer) => {
+			armIdle();
 			buffer += stdoutDecoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
@@ -402,6 +501,8 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 		});
 
 		proc.stderr.on("data", (chunk: Buffer) => {
+			// A process writing to stderr is alive, whatever it is saying.
+			armIdle();
 			appendStderr(stderrDecoder.write(chunk));
 		});
 
@@ -434,11 +535,35 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 			appendStderr(stderrDecoder.end());
 			if (buffer.trim()) processLine(buffer, acc);
 			emitProgress();
-			const report = extractFinalText(acc);
+			const finalReport = extractFinalText(acc);
+			// Salvage: killed with a report half-written. The turn in progress is
+			// one past the completed count. Only a report is worth salvaging —
+			// narration is not — and only when no complete report exists.
+			// Keyed on kind, not presence: tool turns routinely carry narration
+			// text beside their tool calls ("Let me grep for the config keys."),
+			// and that narration is a non-empty final text. Measured in the field
+			// as the last complete assistant text before the kill.
+			const streamed = extractStreamingText(acc);
+			const partial = killedBy !== undefined && looksLikeReport(streamed) && !looksLikeReport(finalReport);
+			const report = partial ? streamed : finalReport;
+			const turn = acc.usage.turns + 1;
+			const phase = partial
+				? ` while writing its report (turn ${turn}); partial report salvaged`
+				: finalReport
+					? ` during turn ${turn}`
+					: ` during turn ${turn} (no report written)`;
+			const killMessage = () =>
+				killedBy === "timeout"
+					? `Explorer timed out after ${formatSeconds(cfg.timeoutMs)}${phase}`
+					: killedBy === "idle"
+						? `Explorer stalled: no output for ${formatSeconds(cfg.idleTimeoutMs)}${phase}`
+						: `Explorer aborted${partial ? "; partial report salvaged" : ""}`;
 			const exited = termSignal ? `signal ${termSignal}` : `code ${code}`;
 			const error =
 				failure ??
-				(code !== 0 || termSignal
+				(killedBy
+					? killMessage()
+					: code !== 0 || termSignal
 					? `Explorer exited with ${exited}${stderr.trim() ? `: ${stderr.trim()}` : ""}`
 					: // Allow-list of one. pi's full stopReason vocabulary is seven
 						// values, and the source is a TRANSITIVE dependency this package
@@ -468,11 +593,11 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 						? `Explorer stopped with reason "${acc.stopReason}"${
 								acc.errorMessage ? `: ${acc.errorMessage}` : ""
 							}`
-						: !report
-							? "Explorer produced no report"
-							: undefined);
+							: !report
+								? "Explorer produced no report"
+								: undefined);
 
-			finish({ brief, report, ok: !error, error, usage: acc.usage });
+			finish({ brief, report, ok: !error, error, usage: acc.usage, ...(partial ? { partial } : {}) });
 		};
 
 		// Fast path: process exited and stdio reached EOF.
@@ -480,6 +605,7 @@ export function runExplorer(opts: RunExplorerOptions): Promise<ExplorerResult> {
 
 		// Backstop: the process exited but something else still holds the pipes.
 		proc.on("exit", (code, termSignal) => {
+			disarm();
 			drainTimer = setTimeout(() => finalize(code, termSignal), DRAIN_MS);
 		});
 	});

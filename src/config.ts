@@ -26,7 +26,20 @@ export interface FastExplorerConfig {
 	maxTurnsPerExplorer: number;
 	minTotalBytes: number;
 	autoPromote: AutoPromoteConfig;
+	/** Hard wall-clock cap per explorer. The backstop, not the working deadline. */
 	timeoutMs: number;
+	/**
+	 * Kill an explorer that produces no output for this long. pi streams a
+	 * `message_update` per token, so a live explorer is never silent for long;
+	 * silence means a stalled provider call or a hung process, and that is what a
+	 * deadline should catch — not a healthy explorer that is still writing.
+	 */
+	idleTimeoutMs: number;
+	/**
+	 * After the first explorer reports, re-dispatch checklist items it left
+	 * unresolved to fresh explorers, once. Off means one wave only.
+	 */
+	escalateUnresolved: boolean;
 }
 
 export const DEFAULT_CONFIG: FastExplorerConfig = {
@@ -76,7 +89,17 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	maxTurnsPerExplorer: 8,
 	minTotalBytes: 51200,
 	autoPromote: { enabled: true, bash: true, minFiles: 15, minMatches: 60 },
-	timeoutMs: 120000,
+	/**
+	 * 300 s, up from 120 s. The lower cap was measured killing a healthy explorer
+	 * on a slow provider: seven tool turns in 43 s, then a report-writing turn of
+	 * 123 s — killed with the answer half-written and every token already paid
+	 * for. Wall-clock is not the signal that distinguishes "slow" from "stuck";
+	 * `idleTimeoutMs` is. This number only has to be high enough never to fire
+	 * on an explorer that is still streaming.
+	 */
+	timeoutMs: 300000,
+	idleTimeoutMs: 60000,
+	escalateUnresolved: true,
 };
 
 export type PartialConfig = Partial<Omit<FastExplorerConfig, "autoPromote">> & {
@@ -92,6 +115,14 @@ export function resolveConfig(partial?: PartialConfig): FastExplorerConfig {
 
 	if (merged.maxFanout < 1) {
 		throw new Error(`fastExplorer.maxFanout must be at least 1, got ${merged.maxFanout}`);
+	}
+	// A zero or negative deadline kills every explorer before its first byte,
+	// with nothing to say so — indistinguishable from the feature being off.
+	if (!(merged.timeoutMs > 0)) {
+		throw new Error(`fastExplorer.timeoutMs must be positive, got ${merged.timeoutMs}`);
+	}
+	if (!(merged.idleTimeoutMs > 0)) {
+		throw new Error(`fastExplorer.idleTimeoutMs must be positive, got ${merged.idleTimeoutMs}`);
 	}
 	// Fanning out wider than the concurrency limit produces multiple waves and
 	// doubles wall-clock for no benefit. See spec, "Performance".
@@ -109,6 +140,7 @@ const NUMBER_KEYS = [
 	"maxTurnsPerExplorer",
 	"minTotalBytes",
 	"timeoutMs",
+	"idleTimeoutMs",
 ] as const;
 
 function typeError(source: string, key: string, expected: string, got: unknown): Error {
@@ -168,6 +200,9 @@ export function validatePartialConfig(source: string, value: unknown): PartialCo
 			out[key as (typeof NUMBER_KEYS)[number]] = v;
 		} else if (key === "autoPromote") {
 			out.autoPromote = validateAutoPromote(source, v);
+		} else if (key === "escalateUnresolved") {
+			if (typeof v !== "boolean") throw typeError(source, key, "a boolean", v);
+			out.escalateUnresolved = v;
 		} else {
 			throw new Error(`${source}: unknown key "${key}"`);
 		}

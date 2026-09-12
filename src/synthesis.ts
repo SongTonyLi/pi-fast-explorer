@@ -1,4 +1,4 @@
-import { reanchorReport } from "./citations.js";
+import { extractCitations, extractQuotes, reanchorReport } from "./citations.js";
 import type { ExplorerResult } from "./explorer.js";
 
 /**
@@ -7,9 +7,35 @@ import type { ExplorerResult } from "./explorer.js";
  * `ok` alone is not enough: an explorer can exit cleanly having produced no
  * report, and a report of whitespace is a report of nothing.
  */
-function producedFindings(r: ExplorerResult): boolean {
-	return r.ok && r.report.trim().length > 0;
+/**
+ * A partial report counts only if it got as far as something checkable — a
+ * citation entry or a quote. A bare heading is a report that says nothing,
+ * and on the auto-promotion path counting it would replace a real grep result
+ * with an empty section.
+ */
+function hasSubstance(report: string): boolean {
+	return extractCitations(report).length > 0 || extractQuotes(report).length > 0;
 }
+
+/**
+ * Whether one explorer came back with something worth reading. Exported so the
+ * checklist is computed from exactly the reports the caller receives.
+ */
+export function producedFindings(r: ExplorerResult): boolean {
+	if (r.report.trim().length === 0) return false;
+	if (r.ok) return true;
+	return r.partial === true && hasSubstance(r.report);
+}
+
+/**
+ * What the main agent is told after a failure. Measured: told "every explorer
+ * failed — timed out", its next move was to issue the identical call again,
+ * which timed out again at the same cost. A failure notice that names no
+ * alternative is read as an invitation to retry.
+ */
+export const RETRY_GUIDANCE =
+	"Do not repeat this explore call unchanged — the failure is not transient. Narrow `scope`, " +
+	"split the brief into a shorter `checklist`, or read the files named above directly.";
 
 /**
  * Whether a whole sweep produced anything at all.
@@ -53,11 +79,27 @@ export function hasFindings(results: readonly ExplorerResult[]): boolean {
  * nothing. Auto-promotion does NOT deliver it: that path has an original search
  * result to keep, and `createSweepHandler` checks `hasFindings` and keeps it.
  */
-export function synthesize(results: ExplorerResult[], cwd: string): string {
+export interface SynthesizeOptions {
+	/** A section placed after the reports and before `## Not Covered`. */
+	coverage?: string;
+	/**
+	 * Append RETRY_GUIDANCE after `## Not Covered`. Only the explore tool asks
+	 * for it: the guidance names `scope` and `checklist`, and on the
+	 * auto-promotion path the model called grep or bash and has no explore call
+	 * to repeat.
+	 */
+	retryGuidance?: boolean;
+}
+
+export function synthesize(results: ExplorerResult[], cwd: string, options: SynthesizeOptions = {}): string {
 	if (results.length === 0) return "No explorers were dispatched.";
 
 	const succeeded = results.filter(producedFindings);
 	const failed = results.filter((r) => !producedFindings(r));
+	// A partial report is delivered as findings AND listed as not fully covered:
+	// its citations are verified like any other's, but the explorer was killed
+	// before it finished, so the area it covers is only partly examined.
+	const partial = succeeded.filter((r) => r.partial === true);
 
 	const sections: string[] = [];
 
@@ -66,14 +108,23 @@ export function synthesize(results: ExplorerResult[], cwd: string): string {
 	} else {
 		for (const r of succeeded) {
 			const { report } = reanchorReport(r.report.trim(), cwd);
-			sections.push(`# Explorer: ${r.brief}\n\n${report}`);
+			const title = r.partial
+				? `# Explorer: ${r.brief} — PARTIAL (killed while writing; incomplete)`
+				: `# Explorer: ${r.brief}`;
+			sections.push(`${title}\n\n${report}`);
 		}
 	}
 
-	if (failed.length > 0) {
-		const lines = failed.map((r) => `- ${r.brief} — ${r.error ?? "no report produced"}`);
+	if (options.coverage) sections.push(options.coverage);
+
+	if (failed.length > 0 || partial.length > 0) {
+		const lines = [
+			...failed.map((r) => `- ${r.brief} — ${r.error ?? "no report produced"}`),
+			...partial.map((r) => `- ${r.brief} — partially covered: ${r.error ?? "report incomplete"}`),
+		];
+		const guidance = options.retryGuidance ? `\n\n${RETRY_GUIDANCE}` : "";
 		sections.push(
-			`## Not Covered\n\nThese areas were NOT examined. Treat them as unverified:\n\n${lines.join("\n")}`,
+			`## Not Covered\n\nThese areas were NOT fully examined. Treat them as unverified:\n\n${lines.join("\n")}${guidance}`,
 		);
 	}
 

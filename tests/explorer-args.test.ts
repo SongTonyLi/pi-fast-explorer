@@ -3,14 +3,23 @@ import { resolveConfig } from "../src/config.js";
 import { buildExplorerArgs } from "../src/explorer.js";
 
 describe("buildExplorerArgs", () => {
-	it("builds a read-only, thinking-off invocation", () => {
-		const args = buildExplorerArgs(resolveConfig(), "claude-opus-5", "/tmp/p.md", "find auth");
+	it("builds a read-only, thinking-off invocation pinned to the session's provider", () => {
+		const args = buildExplorerArgs(
+			resolveConfig(),
+			{ id: "claude-opus-5", provider: "anthropic" },
+			"/tmp/p.md",
+			"find auth",
+		);
 		expect(args).toEqual([
 			"--mode",
 			"json",
 			"-p",
 			"--no-session",
 			"--no-extensions",
+			"--no-skills",
+			"--no-prompt-templates",
+			"--provider",
+			"anthropic",
 			"--model",
 			"claude-opus-5",
 			"--thinking",
@@ -25,13 +34,42 @@ describe("buildExplorerArgs", () => {
 		]);
 	});
 
+	// A model id alone is ambiguous when two providers serve the same id —
+	// `deepseek/deepseek-v4.1-flash` is offered by openrouter and by deepseek
+	// directly. Inheriting the session's model must mean inheriting its provider,
+	// or an explorer can silently bill a different account than the session.
+	it("passes --provider when the inherited model carries one", () => {
+		const args = buildExplorerArgs(
+			resolveConfig(),
+			{ id: "deepseek/deepseek-v4.1-flash", provider: "openrouter" },
+			"/tmp/p.md",
+			"t",
+		);
+		expect(args[args.indexOf("--provider") + 1]).toBe("openrouter");
+		expect(args[args.indexOf("--model") + 1]).toBe("deepseek/deepseek-v4.1-flash");
+	});
+
+	// A configured `model` is a string the user wrote; they can put `provider/id`
+	// in it themselves, and pi resolves that form. Inventing a provider here would
+	// override what they asked for.
+	it("omits --provider for a configured model string", () => {
+		const args = buildExplorerArgs(resolveConfig(), { id: "openai/gpt-5.6" }, "/tmp/p.md", "t");
+		expect(args).not.toContain("--provider");
+		expect(args[args.indexOf("--model") + 1]).toBe("openai/gpt-5.6");
+	});
+
 	// The budget is advisory and always was: pi has no turn-limit flag, so this
 	// sentence is the entire mechanism. It is worded as a target rather than a cap
 	// because a 5-turn "hard cap" was measured being exceeded anyway — and an
 	// explorer that reads the number as a wall stops mid-brief and reports half an
 	// answer. Do not restore "Complete this in at most N turns".
 	it("carries the configured budget as a target rather than a hard cap", () => {
-		const args = buildExplorerArgs(resolveConfig({ maxTurnsPerExplorer: 3 }), "m", "/tmp/p.md", "t");
+		const args = buildExplorerArgs(
+			resolveConfig({ maxTurnsPerExplorer: 3 }),
+			{ id: "m" },
+			"/tmp/p.md",
+			"t",
+		);
 		const task = args.at(-1) ?? "";
 		expect(task.startsWith("Task: t\n\n")).toBe(true);
 		expect(task).toContain("about 3 turns");
@@ -49,24 +87,36 @@ describe("buildExplorerArgs", () => {
 	// of explorers. The explorer prompt asks for ten searches per turn, so the
 	// branching is per-grep: ~40 processes at depth 1, ~1600 at depth 2.
 	it("passes --no-extensions so an explorer cannot re-enter this extension", () => {
-		const args = buildExplorerArgs(resolveConfig(), "m", "/tmp/p.md", "t");
+		const args = buildExplorerArgs(resolveConfig(), { id: "m" }, "/tmp/p.md", "t");
 		expect(args).toContain("--no-extensions");
 	});
 
+	// Retrieval needs no skills and no prompt templates, and every one the user
+	// has installed is otherwise paid for in every explorer's system prompt.
+	// Context files (AGENTS.md) are deliberately still loaded: repository
+	// conventions help an explorer read the tree.
+	it("disables skills and prompt templates but not context files", () => {
+		const args = buildExplorerArgs(resolveConfig(), { id: "m" }, "/tmp/p.md", "t");
+		expect(args).toContain("--no-skills");
+		expect(args).toContain("--no-prompt-templates");
+		expect(args).not.toContain("--no-context-files");
+	});
+
 	it("never grants bash", () => {
-		const args = buildExplorerArgs(resolveConfig(), "m", "/tmp/p.md", "t");
+		const args = buildExplorerArgs(resolveConfig(), { id: "m" }, "/tmp/p.md", "t");
 		const tools = args[args.indexOf("--tools") + 1];
 		expect(tools).not.toContain("bash");
 	});
 
 	it("honors a configured thinking level", () => {
 		const cfg = resolveConfig({ thinking: "low" });
-		const args = buildExplorerArgs(cfg, "m", "/tmp/p.md", "t");
+		const args = buildExplorerArgs(cfg, { id: "m" }, "/tmp/p.md", "t");
 		expect(args[args.indexOf("--thinking") + 1]).toBe("low");
 	});
 
-	it("omits --model when no model is resolved", () => {
+	it("omits --model and --provider when no model is resolved", () => {
 		const args = buildExplorerArgs(resolveConfig(), null, "/tmp/p.md", "t");
 		expect(args).not.toContain("--model");
+		expect(args).not.toContain("--provider");
 	});
 });

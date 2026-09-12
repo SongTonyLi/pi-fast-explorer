@@ -89,3 +89,31 @@ describe("extractFinalText", () => {
 		expect(extractFinalText(createAccumulator())).toBe("");
 	});
 });
+
+describe("streaming text", () => {
+	function upd(ev: Record<string, unknown>): string {
+		return JSON.stringify({ type: "message_update", assistantMessageEvent: ev });
+	}
+
+	it("accumulates text deltas into an open buffer", async () => {
+		const { extractStreamingText } = await import("../src/explorer.js");
+		const acc = createAccumulator();
+		processLine(upd({ type: "text_start", contentIndex: 0 }), acc);
+		processLine(upd({ type: "text_delta", contentIndex: 0, delta: "## Files" }), acc);
+		processLine(upd({ type: "text_delta", contentIndex: 0, delta: " Retrieved" }), acc);
+		expect(extractStreamingText(acc)).toBe("## Files Retrieved");
+		// Streaming text is not a turn and not a report until message_end says so.
+		expect(acc.usage.turns).toBe(0);
+		expect(extractFinalText(acc)).toBe("");
+	});
+
+	it("closes the buffer when the assistant message ends", async () => {
+		const { extractStreamingText } = await import("../src/explorer.js");
+		const acc = createAccumulator();
+		processLine(upd({ type: "text_start", contentIndex: 0 }), acc);
+		processLine(upd({ type: "text_delta", contentIndex: 0, delta: "done" }), acc);
+		processLine(asstMsg("done"), acc);
+		expect(extractStreamingText(acc)).toBe("");
+		expect(extractFinalText(acc)).toBe("done");
+	});
+});

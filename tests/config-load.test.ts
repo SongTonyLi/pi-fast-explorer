@@ -126,3 +126,13 @@ describe("loadConfigFrom", () => {
 		expect(result.error).toContain(projectPath);
 	});
 });
+
+describe("escalateUnresolved", () => {
+	it("is validated as a boolean", () => {
+		writeUser(JSON.stringify({ escalateUnresolved: "yes" }));
+		const result = loadConfigFrom(userPath, projectPath, true);
+		expect(result.error).toMatch(/escalateUnresolved/);
+		writeUser(JSON.stringify({ escalateUnresolved: false }));
+		expect(loadConfigFrom(userPath, projectPath, true).config.escalateUnresolved).toBe(false);
+	});
+});

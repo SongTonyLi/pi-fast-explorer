@@ -20,10 +20,19 @@ import {
 	shouldResetExplorers,
 	upsertExplorer,
 } from "./activity.js";
+import {
+	type ChecklistItem,
+	type ChecklistReport,
+	type ChecklistStatus,
+	formatChecklistCoverage,
+	matchChecklist,
+} from "./checklist.js";
+import { extractCitations } from "./citations.js";
 import { type FastExplorerConfig, type PartialConfig, loadConfigFrom, resolveConfig } from "./config.js";
 import { looksLikeSearchOutput } from "./detect.js";
 import {
 	type Accumulator,
+	type ExplorerModel,
 	type ExplorerResult,
 	NESTED_ENV_VAR,
 	buildExplorerArgs,
@@ -35,10 +44,12 @@ import {
 import { bindExplorerUi, refreshExplorerWidget, registerExplorerCommands, renderExploreCall, renderExploreResult } from "./ui.js";
 import { parseFindOutput, parseGrepMatches, parseGrepOutput, summarizeMatches } from "./parse.js";
 import { bucketByDirectory, computeFanout, shouldExplore } from "./partition.js";
-import { hasFindings, synthesize } from "./synthesis.js";
+import { hasFindings, producedFindings, synthesize } from "./synthesis.js";
 
 export interface ExploreInput {
 	question: string;
+	/** Specific things to locate or answer; each comes back resolved or not. */
+	checklist?: string[];
 	questions?: string[];
 	scope?: string;
 	fanout?: number;
@@ -55,6 +66,8 @@ export interface ExploreDetails {
 	results: ExplorerResult[];
 	/** Live tool-call stream used by the TUI inspector and renderers. */
 	live: ExplorerSnapshot[];
+	/** One verdict per checklist item, after every wave. Empty without a checklist. */
+	checklist: ChecklistStatus[];
 }
 
 function snapshotFromAcc(
@@ -96,6 +109,9 @@ export const CONFIG_FILE_NAME = "fast-explorer.json";
 export const EXPLORE_DESCRIPTION =
 	"Investigate code spanning many files using parallel read-only explorers. " +
 	"Returns cited findings (file:line) instead of raw file contents. " +
+	"Pass `checklist` — the specific things you need located or answered — and every " +
+	"item comes back marked resolved with a citation or unresolved, with unresolved items " +
+	"re-dispatched once to fresh explorers. " +
 	"One explorer is the default: pass `question` alone. `questions` runs one " +
 	"explorer per entry and has no measured benefit — on questions a single " +
 	"explorer already covered it cost about 3.6x for identical recall and worse " +
@@ -114,6 +130,10 @@ export const EXPLORE_DESCRIPTION =
  */
 export const EXPLORE_PROMPT_GUIDELINES = [
 	"Use explore when you need to understand code spanning more than ~5 files.",
+	"Give explore a `checklist` when you know the specific things you need — files, " +
+		"call sites, values, decisions. Each item is returned resolved with file:line or " +
+		"unresolved, and unresolved items are re-dispatched once to fresh explorers that are " +
+		"told what the first one established. Prefer a `checklist` over `questions`.",
 	"Call explore with `question` alone by default — one explorer is the configuration " +
 		"with evidence behind it, and it matched or beat four explorers on recall on every " +
 		"benchmark question.",
@@ -157,6 +177,126 @@ export function buildBriefs(input: ExploreInput, maxFanout: number): string[] {
 	const supplied = (input.questions ?? []).map((q) => q.trim()).filter((q) => q.length > 0);
 	if (supplied.length > 0) return supplied.slice(0, maxFanout);
 	return [input.question];
+}
+
+/**
+ * Cap on checklist items. The list is inlined into every explorer's argv on
+ * both waves and is model-controlled; file lists are capped at 40 for the same
+ * reason (MAX_FILES_PER_BRIEF), and a pathological list should truncate rather
+ * than fail the spawn with E2BIG.
+ */
+export const MAX_CHECKLIST_ITEMS = 40;
+
+/** The checklist as numbered items, blanks dropped, numbered as the explorer will echo them. */
+export function checklistItems(input: ExploreInput): ChecklistItem[] {
+	return (input.checklist ?? [])
+		.map((c) => c.trim())
+		.filter((c) => c.length > 0)
+		.slice(0, MAX_CHECKLIST_ITEMS)
+		.map((item, i) => ({ index: i + 1, item }));
+}
+
+/**
+ * The reports the checklist is matched against: exactly the ones the caller
+ * receives. A report synthesize discards — output cap, error stop, narration
+ * left by a kill — was never verified and is never shown, so its [x] lines
+ * must not count either. `allowed` carries the item numbers a second-wave
+ * brief was handed, keyed by that explorer's brief label.
+ */
+export function checklistReports(
+	results: ExplorerResult[],
+	allowedByBrief: ReadonlyMap<string, number[]> = new Map(),
+): ChecklistReport[] {
+	return results.filter(producedFindings).map((r) => {
+		const allowed = allowedByBrief.get(r.brief);
+		return allowed ? { brief: r.brief, report: r.report, allowed } : { brief: r.brief, report: r.report };
+	});
+}
+
+const CHECKLIST_HEADER = "Checklist — resolve every item and cite file:line for each:";
+
+/** The full task text for one explorer: brief, then checklist, then scope. */
+export function buildTask(brief: string, items: ChecklistItem[], scope: string | undefined): string {
+	let task = brief;
+	if (items.length > 0) {
+		task += `\n\n${CHECKLIST_HEADER}\n${items.map((i) => `${i.index}. ${i.item}`).join("\n")}`;
+	}
+	if (scope) task += `\n\nLimit your search to: ${scope}`;
+	return task;
+}
+
+/** Cap on first-wave files inlined into an escalation brief; see MAX_FILES_PER_BRIEF. */
+export const MAX_ESTABLISHED_FILES = 40;
+
+/**
+ * Briefs for the second wave: the items the first wave left unresolved,
+ * spread round-robin over at most `maxFanout` explorers, each told what the
+ * first wave established so it starts from there rather than from nothing.
+ *
+ * Handing the second wave the first's resolved lines and retrieved files is
+ * the mitigation for partition blindness — the measured failure of fan-out,
+ * where each explorer covers its slice and the connective tissue falls through.
+ * A second-wave explorer is not covering a slice; it is filling gaps in a map
+ * it has been shown. Items keep their original numbers so the reply lines
+ * match up by index as well as by text.
+ */
+export function buildEscalationBriefs(
+	question: string,
+	statuses: ChecklistStatus[],
+	priorReports: string[],
+	maxFanout: number,
+): string[] {
+	const unresolved = statuses.filter((s) => !s.resolved);
+	if (unresolved.length === 0) return [];
+	const resolved = statuses.filter((s) => s.resolved);
+
+	const files = new Map<string, string>();
+	for (const report of priorReports) {
+		for (const c of extractCitations(report)) {
+			if (!files.has(c.file)) files.set(c.file, `${c.file} (lines ${c.startLine}-${c.endLine})`);
+		}
+	}
+	const fileLines = [...files.values()].slice(0, MAX_ESTABLISHED_FILES);
+
+	const established = [
+		...resolved.map((s) => `- [x] ${s.index}. ${s.item} — ${s.note}`),
+		...(fileLines.length > 0 ? ["Files it retrieved:", ...fileLines.map((f) => `- ${f}`)] : []),
+	];
+	const header =
+		`${question}\n\nA first explorer already established the following — do not re-verify it, ` +
+		`build on it:\n${established.join("\n")}`;
+
+	const n = Math.max(1, Math.min(maxFanout, unresolved.length));
+	const groups: ChecklistStatus[][] = Array.from({ length: n }, () => []);
+	unresolved.forEach((s, i) => groups[i % n]!.push(s));
+	return groups.map(
+		(g) => `${header}\n\n${CHECKLIST_HEADER}\n${g.map((s) => `${s.index}. ${s.item}`).join("\n")}`,
+	);
+}
+
+/** The item numbers a second-wave task carries, read back from its checklist block. */
+export function escalationItems(task: string): number[] {
+	const tail = task.slice(task.lastIndexOf(CHECKLIST_HEADER));
+	return [...tail.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+}
+
+/** Short label for a second-wave explorer, from the item numbers its task carries. */
+export function escalationLabel(task: string, ordinal: number, total: number): string {
+	const numbers = escalationItems(task);
+	return `escalation ${ordinal}/${total}: unresolved item${numbers.length === 1 ? "" : "s"} ${numbers.join(", ")}`;
+}
+
+/**
+ * Escalate only when there is something to escalate and something to build
+ * on. A first wave that produced nothing would only be repeated, at the same
+ * cost, and the failure text already says what to do instead.
+ */
+export function shouldEscalate(
+	cfg: FastExplorerConfig,
+	statuses: ChecklistStatus[],
+	wave: ExplorerResult[],
+): boolean {
+	return cfg.escalateUnresolved && statuses.some((s) => !s.resolved) && hasFindings(wave);
 }
 
 /** A match-dense result still needs several files before partitioning helps. */
@@ -332,6 +472,20 @@ export function describeScope(searchDir: string, glob: unknown): string {
 	return parts.join(", ");
 }
 
+/**
+ * Heading for one auto-promotion bucket. Buckets are bin-packed by directory
+ * and routinely span several, so the label names them all (up to three) rather
+ * than the first file's — measured: "8 files under src/memdir" for a bucket
+ * whose report was mostly about src/services.
+ */
+export function describeBucket(bucket: string[]): string {
+	const dirs = [...new Set(bucket.map((f) => dirname(f)))];
+	if (dirs.length <= 1) return `${bucket.length} files under ${dirs[0] ?? "."}`;
+	const shown = dirs.slice(0, 3).join(", ");
+	const more = dirs.length > 3 ? ` +${dirs.length - 3} more` : "";
+	return `${bucket.length} files across ${shown}${more}`;
+}
+
 /** Which tool result a sweep came from. Decides the brief and the spill note. */
 export type SweepKind = "grep" | "find" | "bash";
 
@@ -433,6 +587,23 @@ function aggregateUsage(results: ExplorerResult[]) {
 }
 
 /**
+ * Which model an explorer runs on: the configured one, else the session's.
+ *
+ * A configured model is a string the user wrote and may already be
+ * `provider/id`; no provider is invented for it. An inherited model carries the
+ * session's provider, because a bare id can be served by more than one provider
+ * and an explorer landing on the other one bills a different account silently.
+ */
+export function resolveExplorerModel(
+	cfg: FastExplorerConfig,
+	sessionModel: { id: string; provider?: string } | undefined,
+): ExplorerModel | null {
+	if (cfg.model) return { id: cfg.model };
+	if (sessionModel?.id) return { id: sessionModel.id, provider: sessionModel.provider };
+	return null;
+}
+
+/**
  * The slice of pi's ExtensionContext that auto-promotion actually uses.
  *
  * Declared structurally rather than importing ExtensionContext so the handler
@@ -441,7 +612,7 @@ function aggregateUsage(results: ExplorerResult[]) {
  */
 export interface SweepContext {
 	cwd: string;
-	model: { id: string } | undefined;
+	model: { id: string; provider?: string } | undefined;
 	/** Undefined when the agent is not streaming. Threaded so Esc cancels explorers. */
 	signal: AbortSignal | undefined;
 }
@@ -533,14 +704,14 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		}
 
 		const buckets = bucketByDirectory(files, computeFanout(files.length, cfg.maxFanout));
-		const model = cfg.model ?? ctx.model?.id ?? null;
+		const model = resolveExplorerModel(cfg, ctx.model);
 		const scope = describeScope(searchDir, event.input.glob);
 		// grep and find state their intent in `pattern`; bash has only `command`.
 		const intentKey = kind === "bash" ? "command" : "pattern";
 		const intent = typeof event.input[intentKey] === "string" ? event.input[intentKey] : "";
 
 		const tasks = buckets.map((bucket) => () => {
-			const brief = `${bucket.length} files under ${dirname(bucket[0] ?? ".")}`;
+			const brief = describeBucket(bucket);
 			const id = nextExplorerId();
 			let items: ExplorerSnapshot["items"] = [];
 			upsertExplorer({ id, brief, status: "running", items, report: "" });
@@ -579,6 +750,11 @@ export function createSweepHandler(getConfig: () => FastExplorerConfig) {
 		});
 
 		const results = await runWithConcurrency(tasks, cfg.concurrency);
+
+		// The user cancelled. Whatever the explorers streamed before the abort,
+		// the model's own search result stays: a cancellation must never destroy
+		// the result the user was reading.
+		if (ctx.signal?.aborted) return undefined;
 
 		// Every explorer failed, so there is nothing to promote. Returning here
 		// leaves pi's own result in place byte for byte (`agent-session.js:258` —
@@ -684,6 +860,14 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 		promptGuidelines: EXPLORE_PROMPT_GUIDELINES,
 		parameters: Type.Object({
 			question: Type.String({ description: "What you need to find out" }),
+			checklist: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Specific things to locate or answer, one per entry. Each comes back marked " +
+						"resolved with file:line or unresolved; unresolved items are re-dispatched once " +
+						"to fresh explorers told what the first one found. Prefer this over `questions`.",
+				}),
+			),
 			questions: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
@@ -712,78 +896,128 @@ export default function (pi: ExtensionAPI, userConfig?: PartialConfig) {
 			// all, so the floor of 1 keeps a bad argument from silently no-opping.
 			const maxFanout = Math.max(1, Math.min(input.fanout ?? cfg.maxFanout, cfg.maxFanout));
 			const briefs = buildBriefs(input, maxFanout);
-			const model = cfg.model ?? ctx.model?.id ?? null;
+			const items = checklistItems(input);
+			const model = resolveExplorerModel(cfg, ctx.model);
 			if (ctx.hasUI) bindExplorerUi(ctx.ui);
 
-			const live: ExplorerSnapshot[] = briefs.map((brief) => ({
-				id: nextExplorerId(),
-				brief,
-				status: "running",
-				items: [],
-				report: "",
-			}));
-			for (const snap of live) upsertExplorer(snap);
-			refreshExplorerWidget();
+			// Shared across waves: a second wave appends to all three.
+			const live: ExplorerSnapshot[] = [];
+			const allBriefs: string[] = [];
+			const finished: ExplorerResult[] = [];
+			let checklist: ChecklistStatus[] = [];
 
 			// Partial updates carry `details` too — AgentToolResult requires it on
 			// every emission, not just the final one.
-			const finished: ExplorerResult[] = [];
 			const report = () => {
 				try {
 					onUpdate?.({
 						content: [
-							{ type: "text", text: `${finished.length}/${briefs.length} explorers done` },
+							{ type: "text", text: `${finished.length}/${allBriefs.length} explorers done` },
 						],
-						details: { briefs, results: [...finished], live: live.map((s) => ({ ...s })) },
+						details: {
+							briefs: [...allBriefs],
+							results: [...finished],
+							live: live.map((s) => ({ ...s })),
+							checklist: [...checklist],
+						},
 					});
 				} catch {
 					// Same isolation as onActivity: a throwing renderer must not
 					// fail the explore Promise.all after the money is spent.
 				}
 			};
-			report();
 
-			const tasks = briefs.map((brief, index) => async () => {
-				const task = input.scope ? `${brief}\n\nLimit your search to: ${input.scope}` : brief;
-				// The ceiling is shared with auto-promotion: both paths spawn the
-				// same subprocesses, so neither may budget for itself alone.
-				const result = await withExplorerSlot(cfg.concurrency, () =>
-					runExplorer({
-						command: "pi",
-						args: buildExplorerArgs(cfg, model, PROMPT_PATH, task),
-						brief,
-						cfg,
-						cwd: ctx.cwd,
-						signal,
-						onActivity: (acc) => {
-							live[index] = snapshotFromAcc(live[index]!.id, brief, acc);
-							upsertExplorer(live[index]!);
-							refreshExplorerWidget();
-							report();
-						},
-					}),
-				);
-				live[index] = {
-					id: live[index]!.id,
-					brief,
-					status: result.ok ? "ok" : "failed",
-					items: live[index]!.items,
-					report: result.report,
-					error: result.error,
-				};
-				upsertExplorer(live[index]!);
-				finished.push(result);
+			/** Runs one wave of explorers, registering each with the inspector. */
+			const dispatch = async (
+				wave: Array<{ brief: string; task: string }>,
+			): Promise<ExplorerResult[]> => {
+				const offset = live.length;
+				for (const w of wave) {
+					allBriefs.push(w.brief);
+					live.push({ id: nextExplorerId(), brief: w.brief, status: "running", items: [], report: "" });
+				}
+				for (const snap of live.slice(offset)) upsertExplorer(snap);
 				refreshExplorerWidget();
 				report();
-				return result;
-			});
 
-			const results = await runWithConcurrency(tasks, cfg.concurrency);
+				const tasks = wave.map((w, i) => async () => {
+					const index = offset + i;
+					// The ceiling is shared with auto-promotion: both paths spawn the
+					// same subprocesses, so neither may budget for itself alone.
+					const result = await withExplorerSlot(cfg.concurrency, () =>
+						runExplorer({
+							command: "pi",
+							args: buildExplorerArgs(cfg, model, PROMPT_PATH, w.task),
+							brief: w.brief,
+							cfg,
+							cwd: ctx.cwd,
+							signal,
+							onActivity: (acc) => {
+								live[index] = snapshotFromAcc(live[index]!.id, w.brief, acc);
+								upsertExplorer(live[index]!);
+								refreshExplorerWidget();
+								report();
+							},
+						}),
+					);
+					live[index] = {
+						id: live[index]!.id,
+						brief: w.brief,
+						status: result.ok ? "ok" : "failed",
+						items: live[index]!.items,
+						report: result.report,
+						error: result.error,
+					};
+					upsertExplorer(live[index]!);
+					finished.push(result);
+					refreshExplorerWidget();
+					report();
+					return result;
+				});
+				return runWithConcurrency(tasks, cfg.concurrency);
+			};
+
+			const wave1 = await dispatch(
+				briefs.map((brief) => ({ brief, task: buildTask(brief, items, input.scope) })),
+			);
+			let results = wave1;
+			const allowedByBrief = new Map<string, number[]>();
+			if (items.length > 0) {
+				checklist = matchChecklist(items.map((i) => i.item), checklistReports(wave1));
+				// One escalation wave, never a third: whatever the second wave leaves
+				// unresolved is reported as unresolved.
+				if (!signal?.aborted && shouldEscalate(cfg, checklist, wave1)) {
+					const prior = wave1.filter((r) => r.report.trim().length > 0).map((r) => r.report);
+					const escalations = buildEscalationBriefs(input.question, checklist, prior, maxFanout);
+					const wave2 = await dispatch(
+						escalations.map((task, i) => {
+							const brief = escalationLabel(task, i + 1, escalations.length);
+							allowedByBrief.set(brief, escalationItems(task));
+							return { brief, task: buildTask(task, [], input.scope) };
+						}),
+					);
+					results = [...wave1, ...wave2];
+					checklist = matchChecklist(items.map((i) => i.item), checklistReports(results, allowedByBrief));
+				}
+			}
 			const usage = aggregateUsage(results);
 
-			const details: ExploreDetails = { briefs, results, live: live.map((s) => ({ ...s })) };
+			const details: ExploreDetails = {
+				briefs: allBriefs,
+				results,
+				live: live.map((s) => ({ ...s })),
+				checklist,
+			};
 			return {
-				content: [{ type: "text" as const, text: synthesize(results, ctx.cwd) }],
+				content: [
+					{
+						type: "text" as const,
+						text: synthesize(results, ctx.cwd, {
+							coverage: items.length > 0 ? formatChecklistCoverage(checklist) : undefined,
+							retryGuidance: true,
+						}),
+					},
+				],
 				details,
 				usage,
 			};
