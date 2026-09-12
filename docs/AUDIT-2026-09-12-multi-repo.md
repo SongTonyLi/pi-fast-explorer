@@ -118,7 +118,17 @@ Across seven explorer reports on Dart, TypeScript and SQL: 1 quote marked UNVERI
 | `39bb9c3` | `[x]` defined as answered-with-evidence; paraphrase stripped from notes |
 | `ec5c1e9` | bucket labels name every directory |
 
-State: 489 tests across 23 files, `tsc` and `typecheck:tests` clean, `dist/` built from `ec5c1e9` and loaded by pi from `/Users/songli/fast-explorer`.
+State: 499 tests across 23 files, `tsc` and `typecheck:tests` clean, `dist/` built from `ec5c1e9` and loaded by pi from `/Users/songli/fast-explorer`.
+
+## 3b. Independent review of this branch
+
+The diff was reviewed by a separate agent that executed the branch's `dist/` to reproduce each claim. It confirmed the suite and typechecks and found three defects that mattered, all fixed in the last commit on the branch:
+
+1. **The salvage gate did not fire in the field scenario.** It was keyed on "no final text", but pi's tool turns carry narration text beside their tool calls ("Let me grep for the config keys." was the last complete text in run 1), so the gate never passed. The test stub had omitted the narration. Gate is now keyed on shape — streamed text is a report and the last complete text is not — and the stub carries narration.
+2. **Checklist matching scanned the whole line**, so one item's answer, which naturally mentions related items, could claim another item as resolved — and a wrongly resolved item is never escalated. Matching is now anchored at the start of the line, where the contract puts the item.
+3. **Coverage was computed from reports `synthesize` discards** (output cap, error stop), producing "no findings" next to "2/2 resolved". Coverage now uses exactly the reports the caller receives.
+
+Also fixed from the review: deadlines could fire during the one-second post-exit drain and relabel a complete report as stalled; a user abort during a promoted sweep could replace the grep result with a salvaged fragment (the abort now leaves the original result, and a partial must carry a citation or quote to count at all); retry guidance written for `explore` was emitted on the auto-promotion path; `idleTimeoutMs: 0` was accepted and killed every explorer silently; a second-wave explorer's positional lines could land on item 1; the checklist was uncapped; the README still said skills were inherited. Final state: 499 tests, typechecks clean.
 
 ## 4. Open recommendations, in order
 
