@@ -45,6 +45,7 @@ The model calls it when it knows a sweep is coming.
 ```ts
 explore({
   question: string,      // what you need to find out
+  checklist?: string[],  // specific things to locate or answer — see Checklists
   questions?: string[],  // sub-questions, one per explorer — NOT recommended, see below
   scope?: string,        // glob or directory to limit the search
   fanout?: number,       // lower the number of explorers for this call
@@ -57,7 +58,15 @@ explore({
 
 The tool returns the concatenated explorer reports. Explorers that failed, timed out or produced nothing are listed by name under a `## Not Covered` heading rather than dropped, so the main agent can see which part of the tree is unverified. Explorer token usage and cost are reported back to pi, so they appear in session totals.
 
-While an explorer is running, its tool calls stream into the `explore` tool row (Ctrl+O expands the full trace). A below-editor widget lists live explorers. `/explorers` opens a terminal selector over this session's running and recent explorers so you can pick one and read what it is doing — there is no checklist, only that inspector.
+While an explorer is running, its tool calls stream into the `explore` tool row (Ctrl+O expands the full trace). A below-editor widget lists live explorers. `/explorers` opens a terminal selector over this session's running and recent explorers so you can pick one and read what it is doing. The inspector shows tool calls; checklist coverage is in the tool result, not the inspector.
+
+### Checklists
+
+When you know the specific things you need — files, call sites, values, decisions — pass them as `checklist`. Every explorer gets the whole list in its task text and is required to end its report with a `## Checklist` section: one line per item, `[x]` with a `file:line` when resolved, `[ ]` with what was searched when not. The extension parses that section and appends a `## Checklist coverage` summary to the tool result, so the main agent sees at a glance which items are answered; the same verdicts are in the result's `details.checklist`.
+
+Items the first explorer leaves unresolved are re-dispatched **once**, to up to `maxFanout` fresh explorers. Each is told what the first wave established — its resolved items and the files it retrieved — and is handed only the unresolved items, keeping their original numbers. This is the "explore once, fan out only for what is missing" design that fan-out's measured failure argued for: a second-wave explorer is filling gaps in a map it has been shown, not covering a slice blind. There is never a third wave; what the second leaves unresolved is reported as unresolved. Set `escalateUnresolved` to `false` for one wave only.
+
+A checklist line's `[x]` is the explorer's own claim. The `file:line` on it is not re-verified — only fenced excerpts under `## Key Code` are checked against disk — so treat a resolved item as a pointer to go and read, and the quote next to it as the evidence.
 
 ### Auto-promotion
 
@@ -103,7 +112,9 @@ Defaults:
   "maxTurnsPerExplorer": 8,
   "minTotalBytes": 51200,
   "autoPromote": { "enabled": true, "bash": true, "minFiles": 15, "minMatches": 60 },
-  "timeoutMs": 120000
+  "timeoutMs": 300000,
+  "idleTimeoutMs": 60000,
+  "escalateUnresolved": true
 }
 ```
 
@@ -119,7 +130,9 @@ Defaults:
 | `autoPromote.bash` | Whether `bash` results that parse as search output are promoted too. Separate from `enabled` because the risk profile differs: a `grep` result is a search by construction, while a `bash` result is whatever the model ran, so promoting it rests on inferring intent from output shape. |
 | `autoPromote.minFiles` | Breadth threshold — distinct matched files. |
 | `autoPromote.minMatches` | Density threshold — total matches, requires at least 3 files. |
-| `timeoutMs` | Per-explorer wall-clock limit. On expiry the child gets `SIGTERM`, then `SIGKILL` after a grace period, and its bucket is reported as not covered. |
+| `timeoutMs` | Hard wall-clock cap per explorer. The backstop, not the working deadline: it was 120 s and was measured killing a healthy explorer that had finished reading and was 123 s into writing its report. On expiry the child gets `SIGTERM`, then `SIGKILL` after a grace period. |
+| `idleTimeoutMs` | Kill an explorer that has produced no output for this long. pi streams a `message_update` per token, so a live explorer is never silent for long; silence is a stalled provider call or a hung process, and that is what a deadline should catch. |
+| `escalateUnresolved` | Whether checklist items the first wave leaves unresolved are re-dispatched once. See Checklists. |
 
 `maxFanout > concurrency` is rejected: fanning wider than the concurrency limit produces two waves and roughly doubles wall-clock for no benefit.
 
@@ -169,9 +182,11 @@ The ones you are most likely to hit. The full list, with the mechanism and the e
 - **Recall is a median, not a guarantee.** Parallel LLM calls give different answers across runs. A single `explore` call is a sample, not a measurement.
 - **Quote verification is looser on comments than on code.** It is deliberately indentation-insensitive, and comment-only quotes can survive edits that a code quote would not. Trust a code excerpt's verification more than a prose one's.
 - **Verification only covers blocks the parser can see.** A quote inside a fence the model never closed is marked `UNCHECKED` rather than silently passed — but it is not verified either. Everything measured about contract compliance is a property of one model on a TypeScript corpus.
-- **The turn budget is advisory.** pi exposes no turn-limit flag, so `maxTurnsPerExplorer` is a sentence in the task text, not a mechanism. Explorers exceed it. The only hard stops are `timeoutMs` and the model's own context limit.
+- **The turn budget is advisory.** pi exposes no turn-limit flag, so `maxTurnsPerExplorer` is a sentence in the task text, not a mechanism. Explorers exceed it. The only hard stops are `idleTimeoutMs`, `timeoutMs` and the model's own context limit.
 - **Explorers inherit your skills and the repository's `AGENTS.md`.** Only `--no-extensions` is passed, so per-explorer overhead varies with your environment — and pi loads context files regardless of project trust, so in an untrusted clone the repository's own instructions are in every explorer's system prompt.
 - **`concurrency` is an extension-wide ceiling, not a per-call one.** Both entry paths draw on the same budget, so a batch of promotable searches serializes rather than running wide.
+- **A report cut off by a deadline is delivered as partial, not dropped.** If an explorer is killed while writing, the text it had streamed is verified like any other report and delivered under a heading marked PARTIAL, and the same area is listed under `## Not Covered` as partially covered. Only text that has reached a `##` section is salvaged; mid-sentence narration is not.
+- **Checklist verdicts are the explorer's own.** The `file:line` on a `[x]` line is not re-anchored; only fenced excerpts are. See Checklists.
 - **Spill files are never deleted.** A long session leaves a trail of `fx-matches-*.txt` in the OS temp directory, because the model may still want to read one at any later point.
 - **In headless mode, config warnings are invisible.** `ctx.ui.notify` is a no-op with no UI (`--mode json`, `-p`), so an invalid config file is ignored silently — in exactly the contexts where nobody is watching. It still fails safe.
 - **Signals reach only the direct child.** Timeout and abort signal the spawned `pi` process; grandchildren it started are not signalled.
@@ -197,7 +212,7 @@ One finding is worth surfacing even without its numbers. Five consecutive sweeps
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (440 tests)
+npm test             # vitest (484 tests)
 npm run typecheck:tests
 ```
 
