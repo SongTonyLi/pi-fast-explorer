@@ -70,7 +70,7 @@ A checklist line's `[x]` is the explorer's own claim. The `file:line` on it is n
 
 ### Auto-promotion
 
-A `tool_result` hook watches successful `grep`, `find` and `bash` results and converts sweeps into parallel exploration without being asked. This path matters more in practice than the tool does, because the common failure is the model *not* knowing a sweep was coming.
+A `tool_result` hook watches successful `grep`, `find` and `bash` results and converts sweeps into parallel exploration without being asked. Note that a default `pi` session enables only `read`, `bash`, `edit` and `write` — `grep`, `find` and `ls` exist but are off unless you pass `--tools` — so for most sessions the `bash` trigger is the one that fires. This path matters more in practice than the tool does, because the common failure is the model *not* knowing a sweep was coming.
 
 It promotes when the result looks like a sweep **and** there is enough material to be worth the overhead — two separate gates:
 
@@ -212,7 +212,7 @@ One finding is worth surfacing even without its numbers. Five consecutive sweeps
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (484 tests)
+npm test             # vitest (489 tests)
 npm run typecheck:tests
 ```
 
