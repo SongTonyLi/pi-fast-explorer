@@ -26,7 +26,15 @@ export interface FastExplorerConfig {
 	maxTurnsPerExplorer: number;
 	minTotalBytes: number;
 	autoPromote: AutoPromoteConfig;
+	/** Hard wall-clock cap per explorer. The backstop, not the working deadline. */
 	timeoutMs: number;
+	/**
+	 * Kill an explorer that produces no output for this long. pi streams a
+	 * `message_update` per token, so a live explorer is never silent for long;
+	 * silence means a stalled provider call or a hung process, and that is what a
+	 * deadline should catch — not a healthy explorer that is still writing.
+	 */
+	idleTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: FastExplorerConfig = {
@@ -76,7 +84,16 @@ export const DEFAULT_CONFIG: FastExplorerConfig = {
 	maxTurnsPerExplorer: 8,
 	minTotalBytes: 51200,
 	autoPromote: { enabled: true, bash: true, minFiles: 15, minMatches: 60 },
-	timeoutMs: 120000,
+	/**
+	 * 300 s, up from 120 s. The lower cap was measured killing a healthy explorer
+	 * on a slow provider: seven tool turns in 43 s, then a report-writing turn of
+	 * 123 s — killed with the answer half-written and every token already paid
+	 * for. Wall-clock is not the signal that distinguishes "slow" from "stuck";
+	 * `idleTimeoutMs` is. This number only has to be high enough never to fire
+	 * on an explorer that is still streaming.
+	 */
+	timeoutMs: 300000,
+	idleTimeoutMs: 60000,
 };
 
 export type PartialConfig = Partial<Omit<FastExplorerConfig, "autoPromote">> & {
@@ -109,6 +126,7 @@ const NUMBER_KEYS = [
 	"maxTurnsPerExplorer",
 	"minTotalBytes",
 	"timeoutMs",
+	"idleTimeoutMs",
 ] as const;
 
 function typeError(source: string, key: string, expected: string, got: unknown): Error {

@@ -421,3 +421,165 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		expect(r.report).toContain("Files Retrieved");
 	});
 });
+
+/** Source text for one `message_update` line carrying an assistant text event. */
+function updLine(ev: Record<string, unknown>): string {
+	return `JSON.stringify({ type: "message_update", assistantMessageEvent: ${JSON.stringify(ev)} })`;
+}
+
+// Streams a report one line at a time, slower than the idle window in the
+// tests below but well under their hard cap, then finishes cleanly.
+const slowStreamStub = stub(
+	"slow-stream.mjs",
+	`process.stdout.write(${updLine({ type: "text_start", contentIndex: 0 })} + "\\n");
+let i = 0;
+const t = setInterval(() => {
+	process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "## Files Retrieved\\n" })} + "\\n");
+	if (++i === 20) {
+		clearInterval(t);
+		process.stdout.write(${updLine({ type: "text_end", contentIndex: 0 })} + "\\n" + ${msgLine("## Files Retrieved\n1. a.ts (lines 1-2) - done")} + "\\n", () => process.exit(0));
+	}
+}, 60);`,
+);
+
+// Says one thing and then goes quiet forever: a stalled provider call.
+const stallStub = stub(
+	"stall.mjs",
+	`process.stdout.write(${msgLine("thinking")} + "\\n");
+setTimeout(() => {}, 60000);`,
+);
+
+// Never stops streaming. Only the hard cap can end this one.
+const foreverStub = stub(
+	"forever.mjs",
+	`process.stdout.write(${updLine({ type: "text_start", contentIndex: 0 })} + "\\n");
+setInterval(() => process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "x" })} + "\\n"), 50);`,
+);
+
+// Two completed tool turns, then a report that is still being written when
+// the deadline hits — the shape measured in the field: seven tool turns in
+// 43 s, then a 123 s report turn killed by a 120 s cap.
+const partialStub = stub(
+	"partial.mjs",
+	`const toolTurn = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "grep", arguments: { pattern: "x" } }], usage: { input: 1, output: 1, cost: { total: 0.001 } }, stopReason: "toolUse" } });
+process.stdout.write(toolTurn + "\\n" + toolTurn + "\\n");
+process.stdout.write(${updLine({ type: "text_start", contentIndex: 0 })} + "\\n");
+process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "## Files Retrieved\n1. `a.ts` (lines 1-3) - partial\n\n" })} + "\\n");
+process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "## Key Code\n" })} + "\\n");
+setTimeout(() => {}, 60000);`,
+);
+
+// Mid-sentence narration, no report sections, then a hang.
+const narrationStub = stub(
+	"narration.mjs",
+	`process.stdout.write(${updLine({ type: "text_start", contentIndex: 0 })} + "\\n");
+process.stdout.write(${updLine({ type: "text_delta", contentIndex: 0, delta: "Let me look at a few more files before" })} + "\\n");
+setTimeout(() => {}, 60000);`,
+);
+
+describe("runExplorer deadlines", () => {
+	// The field failure: a healthy explorer streaming its report was killed by a
+	// wall-clock cap set below the time its report takes to generate. Activity
+	// is the right signal — pi streams a delta for every token — so the idle
+	// window must reset on output.
+	it("keeps a slowly streaming explorer alive past the idle window", async () => {
+		const started = Date.now();
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [slowStreamStub],
+			brief: "find s",
+			cfg: resolveConfig({ idleTimeoutMs: 300, timeoutMs: 10000 }),
+			cwd: dir,
+		});
+		expect(r.ok).toBe(true);
+		expect(r.report).toContain("done");
+		expect(r.partial).toBeFalsy();
+		expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+	});
+
+	it("kills an explorer that goes silent, long before the hard cap", async () => {
+		const started = Date.now();
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [stallStub],
+			brief: "find t",
+			cfg: resolveConfig({ idleTimeoutMs: 300, timeoutMs: 60000 }),
+			cwd: dir,
+			sigkillGraceMs: 200,
+		});
+		expect(r.ok).toBe(false);
+		expect(r.error).toMatch(/stalled/i);
+		expect(r.error).toMatch(/no output for 0\.3s/);
+		expect(Date.now() - started).toBeLessThan(3000);
+	});
+
+	it("enforces the hard cap on an explorer that never stops streaming", async () => {
+		const started = Date.now();
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [foreverStub],
+			brief: "find u",
+			cfg: resolveConfig({ idleTimeoutMs: 5000, timeoutMs: 400 }),
+			cwd: dir,
+			sigkillGraceMs: 200,
+		});
+		expect(r.ok).toBe(false);
+		expect(r.error).toMatch(/timed out after 0\.4s/);
+		expect(Date.now() - started).toBeLessThan(3000);
+	});
+
+	it("salvages the report the explorer was writing when the hard cap hit", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [partialStub],
+			brief: "find v",
+			cfg: resolveConfig({ timeoutMs: 500 }),
+			cwd: dir,
+			sigkillGraceMs: 200,
+		});
+		expect(r.ok).toBe(false);
+		expect(r.partial).toBe(true);
+		expect(r.report).toContain("## Files Retrieved");
+		expect(r.report).toContain("partial");
+		expect(r.error).toMatch(/while writing its report/);
+		expect(r.error).toMatch(/turn 3/);
+		expect(r.error).toMatch(/partial report salvaged/);
+	});
+
+	it("salvages the partial report on abort too", async () => {
+		const ac = new AbortController();
+		const p = runExplorer({
+			command: process.execPath,
+			args: [partialStub],
+			brief: "find w",
+			cfg: resolveConfig(),
+			cwd: dir,
+			signal: ac.signal,
+			sigkillGraceMs: 200,
+		});
+		setTimeout(() => ac.abort(), 300);
+		const r = await p;
+		expect(r.ok).toBe(false);
+		expect(r.partial).toBe(true);
+		expect(r.report).toContain("## Files Retrieved");
+		expect(r.error).toMatch(/abort/i);
+		expect(r.error).toMatch(/partial report salvaged/);
+	});
+
+	// Salvage is for reports. Streamed narration carries no section and would
+	// reach the main agent as findings that say nothing.
+	it("does not salvage streamed narration that is not a report", async () => {
+		const r = await runExplorer({
+			command: process.execPath,
+			args: [narrationStub],
+			brief: "find x",
+			cfg: resolveConfig({ timeoutMs: 400 }),
+			cwd: dir,
+			sigkillGraceMs: 200,
+		});
+		expect(r.ok).toBe(false);
+		expect(r.partial).toBeFalsy();
+		expect(r.report).toBe("");
+		expect(r.error).toMatch(/no report written/);
+	});
+});

@@ -43,3 +43,18 @@ describe("resolveConfig", () => {
 		expect(resolveConfig({ maxFanout: 8, concurrency: 8 }).maxFanout).toBe(8);
 	});
 });
+
+describe("deadline defaults", () => {
+	// 120 s was measured killing a healthy explorer mid-report: seven tool turns
+	// in 43 s, then a 123 s report-writing turn. The hard cap is a backstop; the
+	// idle window is what catches a stalled explorer, and pi streams a delta per
+	// token so a live one is never silent for long.
+	it("defaults the hard cap to 300s and the idle window to 60s", () => {
+		expect(resolveConfig().timeoutMs).toBe(300000);
+		expect(resolveConfig().idleTimeoutMs).toBe(60000);
+	});
+
+	it("accepts an idle window override", () => {
+		expect(resolveConfig({ idleTimeoutMs: 5000 }).idleTimeoutMs).toBe(5000);
+	});
+});
