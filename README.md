@@ -97,6 +97,8 @@ Explorers are spawned with `--tools read,grep,find,ls`. `bash` is absent, as are
 
 That is a guarantee about *capability*, not about output. An explorer's prose reaches the main agent unverified; only quoted code is checked against disk.
 
+The prompt tells the explorer the same thing: its tool set is fixed, and a brief that needs more — a command run, a runtime value, a file outside the repository — is to be reported under `## Not Covered` rather than retried or answered by guesswork. That report reaches the main agent verbatim, so a stated gap is something it can act on with the tools the explorer lacks.
+
 Explorers also run with `--no-extensions`, backed up by a `PI_FAST_EXPLORER_NESTED` environment guard. **Do not remove either.** Without them each explorer loads this extension, its own searches trip the auto-promotion hook, and each of those spawns another wave — the failure mode is a fork bomb. Neither `-p` nor `--no-session` stops extension discovery; `--no-extensions` is what does, and the environment guard covers the explicit `-e` loads it cannot reach.
 
 ## Configuration
@@ -212,7 +214,7 @@ One finding is worth surfacing even without its numbers. Five consecutive sweeps
 ```bash
 npm install
 npm run build        # tsc -> dist/
-npm test             # vitest (499 tests)
+npm test             # vitest (500 tests)
 npm run typecheck:tests
 ```
 
