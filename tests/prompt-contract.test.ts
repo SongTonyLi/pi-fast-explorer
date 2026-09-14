@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseChecklist } from "../src/checklist.js";
 import { extractCitations, extractQuotes } from "../src/citations.js";
+import { EXPLORER_TOOLS } from "../src/explorer.js";
 
 /**
  * `prompts/explorer.md` teaches explorers a citation format that `src/citations.ts`
@@ -67,6 +68,29 @@ describe("explorer prompt citation contract", () => {
 		expect(lines[0]?.resolved, DRIFT).toBe(true);
 		expect(lines[1]?.resolved, DRIFT).toBe(false);
 		expect(lines.map((l) => l.index), DRIFT).toEqual([1, 2]);
+	});
+
+	// Explorers are spawned with a fixed tool set and no way to widen it. An
+	// explorer that hits the edge of that set has two bad options — retry the
+	// same call, or improvise an answer it cannot support — and one good one:
+	// say what it could not do. The prompt has to name the tools it actually
+	// has, from the same constant the spawn uses, or it describes a different
+	// explorer than the one running.
+	it("tells an explorer to report a capability it lacks under Not Covered, not retry", () => {
+		const why =
+			"the prompt must carry a limits statement: name the spawned tool set from " +
+			"EXPLORER_TOOLS, forbid retrying a call those tools cannot make, and route " +
+			"the limitation to `## Not Covered` so the dispatching agent can act on it.";
+		const start = PROMPT.indexOf("# Limits\n");
+		expect(start, why).toBeGreaterThan(-1);
+		const rest = PROMPT.slice(start + "# Limits\n".length);
+		const end = rest.search(/^# /m);
+		const limits = end === -1 ? rest : rest.slice(0, end);
+		for (const tool of EXPLORER_TOOLS.split(",")) {
+			expect(limits, why).toContain(`\`${tool}\``);
+		}
+		expect(limits, why).toMatch(/do not retry/i);
+		expect(limits, why).toContain("`## Not Covered`");
 	});
 
 	it("reserves `##` headings for the five sections explorers emit", () => {
